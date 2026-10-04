@@ -1,0 +1,34 @@
+import os
+from pathlib import Path
+
+# Base directories
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+REPORTS_DIR = BASE_DIR / "reports"
+CACHE_DIR = DATA_DIR / "cache"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Environment variables
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env")
+except ImportError:
+    pass
+
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+# DefiLlama Endpoints (Free, no API key required)
+DEFILLAMA_PROTOCOLS_URL = "https://api.llama.fi/protocols"
+DEFILLAMA_FEES_URL = "https://api.llama.fi/overview/fees"
+DEFILLAMA_CHAINS_URL = "https://api.llama.fi/v2/chains"
+
+# CoinGecko Endpoints
+COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+
+# Cache TTL in seconds (default: 4 hours)
+CACHE_TTL = int(os.getenv("CACHE_TTL_HOURS", "4")) * 3600
