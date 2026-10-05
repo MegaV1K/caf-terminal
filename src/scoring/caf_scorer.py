@@ -76,10 +76,31 @@ class CAFScorer:
 
         bq_score = min(100.0, max(20.0, base_bq))
 
+        # Known protocol value capture profiles
+        symbol_upper = (metrics.get("symbol") or "").upper()
+
+        # Tokens with confirmed BUYBACK & BURN, real cash flow, or protocol revenue distribution:
+        REAL_VALUE_CAPTURE_TOKENS = {
+            "RAY", "GEOD", "DEEP", "RUNE", "AKT", "TRAC", "FLUID", "SNX", "GRASS", "MKR", "PUMP", "AAVE"
+        }
+        # Tokens that are purely GOVERNANCE with ZERO direct cash flow to token holders:
+        GOVERNANCE_ONLY_TOKENS = {
+            "COMP", "1INCH", "BAL", "SUSHI", "TWT"
+        }
+        # Legacy dinosaur/zombie chains (stagnant developers, ghost volume from 2017-2021 cycles):
+        LEGACY_ZOMBIE_TOKENS = {
+            "IOTA", "NEO", "EGLD", "MANA", "SAND", "AXS", "EOS", "BCH", "ETC", "CHZ", "GALA", "BAT"
+        }
+
         # 2. Economic Value Capture (EVC) (0-100)
         # Based on real fees/revenue generated relative to valuation
-        evc_score = 50.0  # neutral default
-        if revenue_24h > 0 or fees_24h > 0:
+        if symbol_upper in REAL_VALUE_CAPTURE_TOKENS:
+            evc_score = 90.0  # Confirmed real value capture / buyback & burn
+        elif symbol_upper in GOVERNANCE_ONLY_TOKENS:
+            evc_score = 30.0  # Pure governance penalty: holders receive $0 cash flow
+        elif symbol_upper in LEGACY_ZOMBIE_TOKENS:
+            evc_score = 25.0  # Zombie token with no modern revenue mechanism
+        elif revenue_24h > 0 or fees_24h > 0:
             annualized_rev = (revenue_24h or (fees_24h * 0.2)) * 365
             if mcap > 0 and annualized_rev > 0:
                 ps_ratio = mcap / annualized_rev
@@ -90,13 +111,15 @@ class CAFScorer:
                 elif ps_ratio < 100:
                     evc_score = 68.0
                 else:
-                    evc_score = 52.0
+                    evc_score = 45.0
             else:
-                evc_score = 65.0
+                evc_score = 60.0
         elif "meme" in category:
             evc_score = 15.0
         elif tvl > 50_000_000:
-            evc_score = 60.0
+            evc_score = 55.0
+        else:
+            evc_score = 45.0
 
         # 3. Tokenomics & Dilution Overhang (0-100)
         # Penalizes high FDV / Market Cap ratio
@@ -111,31 +134,39 @@ class CAFScorer:
         elif fdv_mcap_ratio <= 2.5:
             tokenomics_score = 65.0
         elif fdv_mcap_ratio <= 4.0:
-            tokenomics_score = 45.0  # Significant unlocks pending
+            tokenomics_score = 50.0  # Moderate unlocks (SUI, etc.)
         else:
             tokenomics_score = 25.0  # Extreme dilution overhang
 
-        # 4. Resilience & Lindy Effect (0-100)
-        # Market rank, liquidity, multi-chain deployment
-        resilience_score = 50.0
-        if rank <= 50:
+        # 4. Resilience & Modern Lindy Effect (0-100)
+        # Penalizes legacy zombie tokens that have rank only due to inertia
+        if symbol_upper in LEGACY_ZOMBIE_TOKENS:
+            resilience_score = 30.0  # Stagnant ghost chain penalty
+        elif rank <= 50:
             resilience_score = 88.0
         elif rank <= 150:
             resilience_score = 75.0
         elif rank <= 300:
-            resilience_score = 60.0
+            resilience_score = 65.0
         else:
-            resilience_score = 45.0
+            resilience_score = 50.0
+
+        # Ecosystem growth bonus: SUI, SOL, Move, AI, DePIN
+        if symbol_upper in ("SUI", "RAY", "AKT", "GEOD", "TRAC", "GRASS"):
+            resilience_score = min(100.0, resilience_score + 15.0)
 
         chains = metrics.get("chains") or []
         if len(chains) >= 3:
             resilience_score = min(100.0, resilience_score + 8.0)
 
         # 5. Fragility & Risk Exposure (0-100, where 100 = safest, lowest fragility)
-        # Penalizes extreme volatility, meme status, hyper-concentration
         fragility_penalty = 0.0
         if "meme" in category:
             fragility_penalty += 45.0
+        if symbol_upper in LEGACY_ZOMBIE_TOKENS:
+            fragility_penalty += 35.0  # Irrelevance / abandonment risk
+        if symbol_upper in GOVERNANCE_ONLY_TOKENS:
+            fragility_penalty += 20.0  # Regulatory risk of useless governance
         if fdv_mcap_ratio and fdv_mcap_ratio > 5.0:
             fragility_penalty += 20.0
         if rank > 400:
