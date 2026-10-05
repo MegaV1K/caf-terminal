@@ -89,12 +89,17 @@ class GitHubScout:
         except Exception:
             pass
 
+        self._search_rate_limited: bool = False
+
     def search_repo(self, project_name: str, min_stars: int = 50) -> Optional[str]:
         """
         Dynamically searches GitHub for a project's primary repository.
         Used when symbol is NOT in KNOWN_REPOS.
         Returns "owner/repo" string or None if not found.
         """
+        if self._search_rate_limited:
+            return None
+
         cache_key = f"search_{project_name.lower().replace(' ', '_')}"
         cache_path = self._get_cache_path(cache_key)
         cached = self._get_cached(cache_path)
@@ -107,10 +112,12 @@ class GitHubScout:
                 f"{self.BASE_URL}/search/repositories",
                 headers=self.headers,
                 params={"q": query, "sort": "stars", "order": "desc", "per_page": 5},
-                timeout=10,
+                timeout=5,
             )
             if res.status_code in (403, 429):
-                print("[Warning] GitHub Search API rate limit reached.")
+                if not self._search_rate_limited:
+                    self._search_rate_limited = True
+                    print("[GitHub] Search API limit reached — skipping dynamic repo lookup.")
                 return None
             if res.status_code != 200:
                 return None

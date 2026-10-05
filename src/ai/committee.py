@@ -167,13 +167,10 @@ class SignalDetector:
             if category and category not in known_categories and category != "Unknown":
                 triggered_signals.append(("NEW_SECTOR", 55.0))
 
-            # Signal 5: GitHub Developer Momentum (if repo available)
+            # Signal 5: GitHub Developer Momentum (fast O(1) in-memory check for known repos)
             dev_metrics = {}
             if github_scout and symbol:
                 repo_name = github_scout.get_repo_for_symbol(symbol)
-                if not repo_name:
-                    # Try dynamic search if not in KNOWN_REPOS
-                    repo_name = github_scout.search_repo(name)
                 if repo_name:
                     dev_metrics = github_scout.fetch_repo_metrics(repo_name)
                     commits = dev_metrics.get("commits_30d", 0)
@@ -222,8 +219,6 @@ class SignalDetector:
                     dev_metrics = {}
                     if github_scout:
                         repo = github_scout.get_repo_for_symbol(sym)
-                        if not repo:
-                            repo = github_scout.search_repo(va.get("name", sym))
                         if repo:
                             dev_metrics = github_scout.fetch_repo_metrics(repo)
 
@@ -260,6 +255,18 @@ class SignalDetector:
 
         # Sort all signals by strength descending
         signals.sort(key=lambda s: s.signal_strength, reverse=True)
+
+        # Enrich ONLY top candidates with dynamic GitHub repo search (max 5 queries)
+        if github_scout and not getattr(github_scout, "_search_rate_limited", False):
+            for s in signals[:5]:
+                if s.dev_score is None:
+                    discovered = github_scout.search_repo(s.name)
+                    if discovered:
+                        m = github_scout.fetch_repo_metrics(discovered)
+                        s.dev_score = m.get("dev_score")
+                        s.commits_30d = m.get("commits_30d")
+                        s.github_repo = m.get("repo")
+
         return signals
 
 
