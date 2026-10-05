@@ -61,6 +61,9 @@ class CommitteeReportGenerator:
                 f"**TVL:** {'${:,.0f}'.format(s.tvl) if s.tvl else 'N/A'} | "
                 f"**7d TVL:** {('+' if (s.change_7d or 0) > 0 else '')+str(round(s.change_7d or 0, 1))+'%'} | "
                 f"**24h Fees:** {'${:,.0f}'.format(s.daily_fees) if s.daily_fees else 'N/A'}  ",
+                f"**MCap:** {'${:,.0f}'.format(s.mcap) if s.mcap else 'N/A'} | "
+                f"**Turnover (Vol/MCap):** {f'{s.vol_mcap_ratio:.2f}x' if s.vol_mcap_ratio else 'N/A'} | "
+                f"**GitHub Dev Health:** {f'{s.dev_score:.0f}/100 ({s.commits_30d or 0} commits 30d)' if s.dev_score is not None else 'N/A'}  ",
                 "",
                 "### Тезис аналитика",
                 r.analyst_thesis,

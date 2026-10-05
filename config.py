@@ -20,7 +20,8 @@ except ImportError:
 
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 # DefiLlama Endpoints (Free, no API key required)
 DEFILLAMA_PROTOCOLS_URL = "https://api.llama.fi/protocols"
@@ -29,6 +30,7 @@ DEFILLAMA_CHAINS_URL = "https://api.llama.fi/v2/chains"
 
 # CoinGecko Endpoints
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+COINGECKO_TRENDING_URL = "https://api.coingecko.com/api/v3/search/trending"
 
 # Cache TTL in seconds (default: 4 hours)
 CACHE_TTL = int(os.getenv("CACHE_TTL_HOURS", "4")) * 3600

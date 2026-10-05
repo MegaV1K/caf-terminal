@@ -150,12 +150,12 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
     print(f"Кандидатов на рассмотрение: топ-{max_candidates} по силе сигнала")
     print("=" * 60)
 
-    # Fetch raw data
+    # 1. Fetch on-chain protocols & fees (DefiLlama)
+    print("\n[1/3] Загрузка ончейн-протоколов и сборов с DefiLlama...")
     llama = DefiLlamaScout()
     protocols = llama.fetch_protocols(force_refresh=force_refresh)
     fees_data = llama.fetch_fees_and_revenue(force_refresh=force_refresh)
 
-    # Merge fee data into protocols for signal detection
     fees_by_name = {}
     for p in fees_data.get("protocols", []):
         fees_by_name[(p.get("name") or "").lower()] = p
@@ -167,10 +167,25 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
             p["daily_fees"] = fee_info.get("total24h")
             p["daily_revenue"] = fee_info.get("totalRevenue24h")
 
+    # 2. Fetch market volume anomalies & trending (CoinGecko)
+    print("[2/3] Загрузка объемов и трендовых нарративов с CoinGecko...")
+    cg = CoinGeckoScout()
+    cg_markets = cg.fetch_markets(pages=2, force_refresh=force_refresh)
+    volume_anomalies = cg.get_volume_anomalies(markets=cg_markets)
+    trending_coins = cg.fetch_trending(force_refresh=force_refresh)
+
+    # 3. Setup GitHub developer activity scout
+    print("[3/3] Подключение анализа активности разработчиков (GitHub)...")
+    from src.scouts.github import GitHubScout
+    github_scout = GitHubScout()
+
     # Run committee
     committee = InvestmentCommittee()
     reports = committee.run_monthly_scan(
         protocols=protocols,
+        volume_anomalies=volume_anomalies,
+        trending_coins=trending_coins,
+        github_scout=github_scout,
         max_candidates=max_candidates,
     )
 

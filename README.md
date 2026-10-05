@@ -38,16 +38,21 @@ CAF/
 ├── requirements.txt          # Зависимости проекта
 ├── .env.example              # Шаблон API ключей
 ├── data/
-│   └── cache/                # Кэш ответов API (TTL = 4 часа)
+│   └── cache/                # Кэш ответов API (TTL = 4-24 ч)
 ├── reports/                  # Сгенерированные Markdown и CSV отчёты
 └── src/
     ├── scouts/
-    │   ├── defillama.py      # Сборщик TVL, комиссий и сборов (DefiLlama API)
-    │   └── coingecko.py      # Сборщик рыночных данных, FDV и объемов (CoinGecko API)
+    │   ├── defillama.py      # Сборщик TVL, комиссий и сборов (DefiLlama)
+    │   ├── coingecko.py      # Сборщик MCap, FDV, аномалий объема и трендов (CoinGecko)
+    │   └── github.py         # Сборщик коммитов, контрибьюторов и dev-скора (GitHub)
     ├── scoring/
     │   └── caf_scorer.py     # Алгоритм 5-столпового CVE скоринга и Emerging радара
+    ├── ai/
+    │   ├── committee.py      # 3-агентный Инвестиционный Комитет (Analyst, Skeptic, CFO)
+    │   └── llm_agent.py      # LLM-агент аналитики
     └── reports/
-        └── report_generator.py # Генератор Markdown и CSV таблиц
+        ├── report_generator.py   # Генератор отчетов радара и скоринга
+        └── committee_report.py   # Генератор протоколов Инвестиционного Комитета
 ```
 
 ---
@@ -59,13 +64,19 @@ CAF/
 .\.venv\Scripts\Activate.ps1
 ```
 
-### 2. Запуск Emerging / Incubator радара
+### 2. Запуск 3-агентного Инвестиционного Комитета (Мульти-источники)
+Сбор сигналов с DefiLlama + CoinGecko + GitHub, дебаты Analyst vs Skeptic и вердикт CFO:
+```powershell
+python main.py --committee --candidates 5
+```
+
+### 3. Запуск Emerging / Incubator радара
 Поиск перспективных проектов с TVL > $1M, положительной динамикой за 7/30 дней и генерацией комиссий:
 ```powershell
 python main.py --radar --top 15
 ```
 
-### 3. Запуск фундаментального CVE-скоринга
+### 4. Запуск фундаментального CVE-скоринга
 Оценка ключевых активов из вашего пула по 5 столпам:
 ```powershell
 python main.py --cve

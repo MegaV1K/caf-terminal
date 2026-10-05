@@ -126,3 +126,82 @@ class CoinGeckoScout:
             result[symbol] = item
             result[coin_id] = item
         return result
+
+    def fetch_trending(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """
+        Fetches trending coins from CoinGecko /search/trending.
+        Identifies early narrative shifts, new listings, and sudden attention.
+        """
+        cache_file = self.cache_dir / "coingecko_trending.json"
+        if not force_refresh:
+            cached = self._get_cached(cache_file)
+            if cached:
+                return cached
+
+        print("[CoinGecko] Получение трендовых монет (/search/trending)...")
+        try:
+            url = f"{COINGECKO_BASE_URL}/search/trending"
+            res = requests.get(url, headers=self.headers, timeout=15)
+            res.raise_for_status()
+            data = res.json()
+            coins_raw = data.get("coins", [])
+            trending = []
+            for entry in coins_raw:
+                item = entry.get("item", {})
+                trending.append({
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "symbol": (item.get("symbol") or "").upper(),
+                    "rank": item.get("market_cap_rank"),
+                    "score": item.get("score"),  # 0 is top trending
+                })
+            self._save_cache(cache_file, trending)
+            return trending
+        except Exception as e:
+            print(f"[Error] Ошибка получения трендов CoinGecko: {e}")
+            cached = self._get_cached(cache_file)
+            if cached:
+                return cached
+            return []
+
+    def get_volume_anomalies(
+        self,
+        markets: Optional[List[Dict[str, Any]]] = None,
+        min_vol_mcap_ratio: float = 0.30,  # 30%+ turnover
+        max_mcap: float = 300_000_000,
+        min_vol: float = 1_000_000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Finds tokens with abnormal trading volume momentum outside giant caps.
+        Sign: Smart money accumulation or sudden narrative awakening.
+        """
+        if markets is None:
+            markets = self.fetch_markets()
+
+        anomalies = []
+        for coin in markets:
+            mcap = coin.get("market_cap") or 0
+            vol = coin.get("total_volume") or 0
+            change_7d = coin.get("price_change_percentage_7d_in_currency") or 0
+
+            if vol < min_vol:
+                continue
+            if mcap > max_mcap or mcap == 0:
+                continue
+
+            ratio = vol / mcap
+            if ratio >= min_vol_mcap_ratio:
+                anomalies.append({
+                    "id": coin.get("id"),
+                    "name": coin.get("name"),
+                    "symbol": (coin.get("symbol") or "").upper(),
+                    "rank": coin.get("market_cap_rank"),
+                    "mcap": mcap,
+                    "volume_24h": vol,
+                    "vol_mcap_ratio": round(ratio, 2),
+                    "change_7d": round(change_7d, 2),
+                    "fdv_mcap_ratio": round((coin.get("fully_diluted_valuation") or mcap) / mcap, 2),
+                })
+
+        anomalies.sort(key=lambda x: x["vol_mcap_ratio"], reverse=True)
+        return anomalies

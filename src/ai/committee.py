@@ -46,7 +46,7 @@ class Signal:
     name: str
     symbol: str
     category: str
-    signal_type: str          # e.g. "TVL_SPIKE", "REVENUE_SURGE", "NEW_SECTOR", "DEV_ACTIVITY"
+    signal_type: str          # e.g. "TVL_SPIKE", "REVENUE_SURGE", "DEV_ACTIVITY_SURGE", "VOLUME_ANOMALY", "TRENDING_ATTENTION"
     signal_strength: float    # 0-100
     tvl: Optional[float] = None
     change_7d: Optional[float] = None
@@ -54,6 +54,10 @@ class Signal:
     daily_revenue: Optional[float] = None
     mcap: Optional[float] = None
     fdv_mcap_ratio: Optional[float] = None
+    vol_mcap_ratio: Optional[float] = None
+    dev_score: Optional[float] = None
+    commits_30d: Optional[int] = None
+    github_repo: Optional[str] = None
     chains: List[str] = field(default_factory=list)
     notes: str = ""           # Free-form extra context
 
@@ -78,33 +82,42 @@ class SignalDetector:
     Philosophy: we don't scan 500 coins — we look for signals that tell us
     something UNUSUAL is happening. Only those trigger the committee.
 
-    Signal types:
-    - TVL_SPIKE:       7d TVL growth > threshold
-    - REVENUE_SURGE:   daily revenue > threshold relative to TVL
-    - CAPITAL_EFFICIENCY: very high fees/TVL ratio (hidden gem)
-    - NEW_SECTOR:      category not seen before in our universe
-    - UNLOCK_RISK:     FDV/MCap ratio extremely high — mark as danger signal
+    Filters applied in order:
+    1. TVL must be > min_tvl ($1M) — proof of real capital
+    2. MCap must be < max_mcap ($300M) — we want EMERGING, not blue chips
+    3. At least ONE strong signal must fire:
+       - TVL_SPIKE:          7d TVL growth > 30%
+       - REVENUE_SURGE:      daily fees > $10k AND fees/TVL > 0.5%
+       - CAPITAL_EFFICIENCY: fees/TVL > 2% (hidden gem economics)
+       - NEW_SECTOR:         category we haven't tracked before
     """
 
-    TVL_SPIKE_THRESHOLD   = 20.0    # % 7d TVL growth
-    REVENUE_SURGE_MIN     = 5_000   # USD daily fees/revenue
-    FEE_TVL_RATIO_MIN     = 0.01    # 1% daily fees/TVL → high capital efficiency
-    UNLOCK_RISK_RATIO     = 5.0     # FDV/MCap above this → dilution danger
+    TVL_SPIKE_THRESHOLD    = 30.0      # % 7d TVL growth (was 20 — too noisy)
+    REVENUE_SURGE_MIN      = 10_000    # USD daily fees/revenue (was 5k)
+    FEE_TVL_RATIO_MIN      = 0.005     # 0.5% daily fees/TVL (was 0.01 → 1%)
+    CAPITAL_EFF_THRESHOLD  = 0.02      # 2% daily fees/TVL = ultra-efficient
+    UNLOCK_RISK_RATIO      = 5.0       # FDV/MCap above this → dilution danger
 
     def detect(
         self,
         protocols: List[Dict[str, Any]],
         known_categories: Optional[set] = None,
-        min_tvl: float = 500_000,
-        max_mcap: float = 2_000_000_000,
+        volume_anomalies: Optional[List[Dict[str, Any]]] = None,
+        trending_coins: Optional[List[Dict[str, Any]]] = None,
+        github_scout: Optional[Any] = None,
+        min_tvl: float = 2_000_000,    # raised from $500k to $2M
+        max_mcap: float = 300_000_000, # lowered from $2B to $300M (truly emerging)
     ) -> List[Signal]:
         """
-        Scans protocol list and returns only those that trigger a strong signal.
-        Crucially: a project with NO signal gets ignored completely.
+        Scans multi-source data: DefiLlama (TVL/fees), CoinGecko (volume/trending),
+        and GitHub (developer activity).
+        Only coins triggering strong signals are returned.
         """
         signals: List[Signal] = []
         known_categories = known_categories or set()
+        seen_symbols = set()
 
+        # 1. Process On-Chain Protocols (DefiLlama + GitHub)
         for p in protocols:
             tvl      = p.get("tvl") or 0
             mcap     = p.get("mcap") or 0
@@ -116,7 +129,6 @@ class SignalDetector:
             name     = p.get("name", "")
             symbol   = (p.get("symbol") or "").upper()
 
-            # Hard gates: too small or too big to be "emerging"
             if tvl < min_tvl:
                 continue
             if mcap > max_mcap and mcap > 0:
@@ -124,34 +136,46 @@ class SignalDetector:
 
             triggered_signals = []
 
-            # 1. TVL Spike
+            # Signal 1: TVL Spike
             if change7d >= self.TVL_SPIKE_THRESHOLD:
-                strength = min(100.0, 50 + change7d * 0.8)
+                strength = min(100.0, 50 + change7d * 0.6)
                 triggered_signals.append(("TVL_SPIKE", round(strength, 1)))
 
-            # 2. Revenue / Fee Surge
-            if fees >= self.REVENUE_SURGE_MIN or revenue >= self.REVENUE_SURGE_MIN:
-                best_rev = max(fees, revenue)
-                strength = min(100.0, 40 + best_rev / 1000)
-                triggered_signals.append(("REVENUE_SURGE", round(strength, 1)))
-
-            # 3. Capital Efficiency
-            if tvl > 0 and fees > 0:
+            # Signal 2: Revenue Surge
+            if fees >= self.REVENUE_SURGE_MIN and tvl > 0:
                 fee_tvl = fees / tvl
                 if fee_tvl >= self.FEE_TVL_RATIO_MIN:
-                    strength = min(100.0, fee_tvl * 5000)
+                    strength = min(100.0, 40 + fee_tvl * 8000)
+                    triggered_signals.append(("REVENUE_SURGE", round(strength, 1)))
+
+            # Signal 3: Capital Efficiency
+            if tvl > 0 and fees > 0:
+                fee_tvl = fees / tvl
+                if fee_tvl >= self.CAPITAL_EFF_THRESHOLD:
+                    strength = min(100.0, fee_tvl * 3000)
                     triggered_signals.append(("CAPITAL_EFFICIENCY", round(strength, 1)))
 
-            # 4. New Sector (not in our tracked universe)
+            # Signal 4: New Sector
             if category and category not in known_categories and category != "Unknown":
-                triggered_signals.append(("NEW_SECTOR", 60.0))
+                triggered_signals.append(("NEW_SECTOR", 55.0))
+
+            # Signal 5: GitHub Developer Momentum (if repo available)
+            dev_metrics = {}
+            if github_scout and symbol:
+                repo_name = github_scout.get_repo_for_symbol(symbol)
+                if repo_name:
+                    dev_metrics = github_scout.fetch_repo_metrics(repo_name)
+                    commits = dev_metrics.get("commits_30d", 0)
+                    dev_score = dev_metrics.get("dev_score", 0)
+                    if commits >= 20 or dev_score >= 70:
+                        triggered_signals.append(("DEV_ACTIVITY_SURGE", round(dev_score, 1)))
 
             if not triggered_signals:
                 continue
 
-            # Pick the strongest signal as primary
             primary_type, primary_strength = max(triggered_signals, key=lambda x: x[1])
             all_types = ", ".join(t for t, _ in triggered_signals)
+            seen_symbols.add(symbol)
 
             signals.append(Signal(
                 name=name,
@@ -165,11 +189,64 @@ class SignalDetector:
                 daily_revenue=revenue if revenue else None,
                 mcap=mcap if mcap else None,
                 fdv_mcap_ratio=fdv_mcap,
+                dev_score=dev_metrics.get("dev_score"),
+                commits_30d=dev_metrics.get("commits_30d"),
+                github_repo=dev_metrics.get("repo"),
                 chains=p.get("chains", []),
                 notes=f"All triggered signals: {all_types}",
             ))
 
-        # Sort by signal strength descending
+        # 2. Process Market Volume Anomalies (CoinGecko)
+        if volume_anomalies:
+            for va in volume_anomalies:
+                sym = va.get("symbol", "").upper()
+                if sym in seen_symbols:
+                    continue  # already evaluated with on-chain data
+
+                ratio = va.get("vol_mcap_ratio", 0)
+                if ratio >= 0.35:  # high turnover
+                    strength = min(100.0, 45.0 + ratio * 40.0)
+                    seen_symbols.add(sym)
+
+                    # Check dev metrics if repo known
+                    dev_metrics = {}
+                    if github_scout:
+                        repo = github_scout.get_repo_for_symbol(sym)
+                        if repo:
+                            dev_metrics = github_scout.fetch_repo_metrics(repo)
+
+                    signals.append(Signal(
+                        name=va.get("name", sym),
+                        symbol=sym,
+                        category="Market Mover / Emerging",
+                        signal_type="VOLUME_ANOMALY",
+                        signal_strength=round(strength, 1),
+                        mcap=va.get("mcap"),
+                        fdv_mcap_ratio=va.get("fdv_mcap_ratio"),
+                        vol_mcap_ratio=ratio,
+                        dev_score=dev_metrics.get("dev_score"),
+                        commits_30d=dev_metrics.get("commits_30d"),
+                        github_repo=dev_metrics.get("repo"),
+                        notes=f"Turnover: {ratio}x volume/mcap. 7d change: {va.get('change_7d')}%",
+                    ))
+
+        # 3. Process Trending Coins (CoinGecko Trending)
+        if trending_coins:
+            for tc in trending_coins[:5]:
+                sym = tc.get("symbol", "").upper()
+                if sym in seen_symbols:
+                    continue
+                seen_symbols.add(sym)
+                signals.append(Signal(
+                    name=tc.get("name", sym),
+                    symbol=sym,
+                    category="Trending Search Narrative",
+                    signal_type="TRENDING_ATTENTION",
+                    signal_strength=72.0,
+                    notes=f"Top search attention rank: {tc.get('score', 0) + 1}",
+                ))
+
+        # Sort all signals by strength descending
         signals.sort(key=lambda s: s.signal_strength, reverse=True)
         return signals
 
@@ -201,13 +278,16 @@ class _BaseAgent:
         rev_str   = f"${s.daily_revenue:,.0f}" if s.daily_revenue else "N/A"
         fdv_str   = f"{s.fdv_mcap_ratio:.2f}x" if s.fdv_mcap_ratio else "N/A"
         c7d_str   = f"+{s.change_7d:.1f}%" if s.change_7d and s.change_7d > 0 else (f"{s.change_7d:.1f}%" if s.change_7d else "N/A")
+        vol_str   = f"{s.vol_mcap_ratio:.2f}x" if s.vol_mcap_ratio else "N/A"
+        dev_str   = f"{s.dev_score:.0f}/100 (Commits 30d: {s.commits_30d or 0}, repo: {s.github_repo})" if s.dev_score is not None else "N/A"
         return (
             f"Project: {s.name} ({s.symbol})\n"
             f"Sector: {s.category}\n"
             f"Signal: {s.signal_type} (strength {s.signal_strength}/100)\n"
             f"TVL: {tvl_str} | 7d TVL: {c7d_str}\n"
             f"Daily Fees: {fees_str} | Daily Revenue: {rev_str}\n"
-            f"MCap: {mcap_str} | FDV/MCap: {fdv_str}\n"
+            f"MCap: {mcap_str} | FDV/MCap: {fdv_str} | Volume/MCap: {vol_str}\n"
+            f"Developer Health (GitHub): {dev_str}\n"
             f"Chains: {', '.join(s.chains[:4]) or 'Unknown'}\n"
             f"Notes: {s.notes}"
         )
@@ -401,20 +481,27 @@ class InvestmentCommittee:
         self,
         protocols: List[Dict[str, Any]],
         known_categories: Optional[set] = None,
+        volume_anomalies: Optional[List[Dict[str, Any]]] = None,
+        trending_coins: Optional[List[Dict[str, Any]]] = None,
+        github_scout: Optional[Any] = None,
         max_candidates: int = 5,
     ) -> List[CommitteeReport]:
         """
-        Monthly radar run. Only processes top signals — not the whole market.
+        Monthly radar run across multi-source signals (DefiLlama, CoinGecko, GitHub).
+        Only processes top signals — not the whole market.
         Returns committee reports sorted by verdict priority (FULL_CAF first).
         """
         print("\n" + "="*60)
-        print("[COMMITTEE] ЕЖЕМЕСЯЧНЫЙ СКАН: ПОИСК СИГНАЛОВ")
+        print("[COMMITTEE] ЕЖЕМЕСЯЧНЫЙ СКАН: ПОИСК СИГНАЛОВ (DefiLlama + CoinGecko + GitHub)")
         print("="*60)
 
         detector = SignalDetector()
         signals = detector.detect(
-            protocols,
+            protocols=protocols,
             known_categories=known_categories,
+            volume_anomalies=volume_anomalies,
+            trending_coins=trending_coins,
+            github_scout=github_scout,
         )
 
         if not signals:
