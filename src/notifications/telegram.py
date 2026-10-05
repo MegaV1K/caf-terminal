@@ -187,42 +187,59 @@ def notify_rebalance_results(rebalance_summary: Dict[str, Any]) -> None:
 
 
 def notify_portfolio_registry(active_portfolio: List[Dict[str, Any]], watchlist_count: int) -> None:
-    """Sends current active portfolio card to Telegram."""
-    lines = ["<b>💼 CAF-Terminal | Институциональный Портфель (20 активов)</b>\n"]
+    """Sends current active portfolio card to Telegram with Valuation & Tactical Deployments."""
+    from src.scoring.valuation import ValuationEngine
+
+    val_ratings = {
+        a["symbol"]: ValuationEngine.evaluate_entry(
+            symbol=a["symbol"],
+            name=a["name"],
+            tier=a["tier"],
+            cluster=a.get("cluster") or a.get("sector") or "",
+            fundamental_score=a["score"] or 70.0,
+            target_weight=a.get("target_weight") or 0.0,
+        )
+        for a in active_portfolio
+    }
 
     core = [a for a in active_portfolio if a['tier'] in ('Core', 'Core Candidate')]
     high_conv = [a for a in active_portfolio if a['tier'] == 'High Conviction']
     incubator = [a for a in active_portfolio if a['tier'] in ('Invest', 'Incubator')]
 
-    total_weight = sum(a.get("target_weight", 0) or 0 for a in active_portfolio)
-    cash_reserve = max(0.0, round(100.0 - total_weight, 1))
+    total_target = sum(r.target_weight for r in val_ratings.values())
+    total_deployed = sum(r.deployed_weight for r in val_ratings.values())
+    total_dry_powder = sum(r.dry_powder_weight for r in val_ratings.values())
+    structural_cash = max(0.0, round(100.0 - total_target, 1))
+
+    lines = ["<b>💼 CAF-Terminal | Институциональный Портфель (20 активов)</b>\n"]
 
     if core:
         core_sum = sum(a.get("target_weight", 0) or 0 for a in core)
-        lines.append(f"🟢 <b>Core ({core_sum:.1f}% пула):</b>")
+        lines.append(f"🟢 <b>Core ({core_sum:.1f}% Target):</b>")
         for a in core:
-            w = f"{a['target_weight']:.1f}%" if a.get('target_weight') else "—"
-            c = f"[{a.get('cluster', '')}]" if a.get('cluster') else ""
-            lines.append(f"  • <b>{a['symbol']}</b> — <b>{w}</b> | Score: {a['score']:.1f} <i>{c}</i>")
+            vr = val_ratings[a["symbol"]]
+            lines.append(f"  • <b>{vr.symbol}</b> — Цель: <b>{vr.target_weight:.1f}%</b> (Развёрнуто: {vr.deployed_weight:.1f}%) | {vr.entry_signal} <i>[{vr.cluster}]</i>")
 
     if high_conv:
         hc_sum = sum(a.get("target_weight", 0) or 0 for a in high_conv)
-        lines.append(f"\n🔵 <b>High Conviction ({hc_sum:.1f}% пула):</b>")
+        lines.append(f"\n🔵 <b>High Conviction ({hc_sum:.1f}% Target):</b>")
         for a in high_conv:
-            w = f"{a['target_weight']:.1f}%" if a.get('target_weight') else "—"
-            c = f"[{a.get('cluster', '')}]" if a.get('cluster') else ""
-            lines.append(f"  • <b>{a['symbol']}</b> — <b>{w}</b> | Score: {a['score']:.1f} <i>{c}</i>")
+            vr = val_ratings[a["symbol"]]
+            lines.append(f"  • <b>{vr.symbol}</b> — Цель: <b>{vr.target_weight:.1f}%</b> (Развёрнуто: {vr.deployed_weight:.1f}%) | {vr.entry_signal} <i>[{vr.cluster}]</i>")
 
     if incubator:
         inc_sum = sum(a.get("target_weight", 0) or 0 for a in incubator)
-        lines.append(f"\n🟡 <b>Incubator ({inc_sum:.1f}% пула):</b>")
+        lines.append(f"\n🟡 <b>Incubator ({inc_sum:.1f}% Target):</b>")
         for a in incubator:
-            w = f"{a['target_weight']:.1f}%" if a.get('target_weight') else "—"
-            c = f"[{a.get('cluster', '')}]" if a.get('cluster') else ""
-            lines.append(f"  • <b>{a['symbol']}</b> — <b>{w}</b> | Score: {a['score']:.1f} <i>{c}</i>")
+            vr = val_ratings[a["symbol"]]
+            lines.append(f"  • <b>{vr.symbol}</b> — Цель: <b>{vr.target_weight:.1f}%</b> (Развёрнуто: {vr.deployed_weight:.1f}%) | {vr.entry_signal} <i>[{vr.cluster}]</i>")
 
-    lines.append(f"\n🛡️ <b>USDC Cash Buffer:</b> <b>{cash_reserve:.1f}%</b>")
-    lines.append(f"• Активов в портфеле: <b>{len(active_portfolio)} / 20</b> | Watchlist: <b>{watchlist_count}</b>")
+    lines.append(f"\n📊 <b>Тактическое развёртывание:</b>")
+    lines.append(f"• Фактически развёрнуто: <b>{total_deployed:.1f}%</b>")
+    lines.append(f"• Тактический Dry Powder под сетки: <b>{total_dry_powder:.1f}%</b>")
+    lines.append(f"• Базовый кэш (USDC): <b>{structural_cash:.1f}%</b>")
+    lines.append(f"• Совокупная ликвидность: <b>{round(structural_cash + total_dry_powder, 1):.1f}%</b>")
+    lines.append(f"\n• Активов в портфеле: <b>{len(active_portfolio)} / 20</b> | Watchlist: <b>{watchlist_count}</b>")
     lines.append("\n<i>Полный отчет: reports/caf_portfolio_registry.md</i>")
     notify("\n".join(lines))
 

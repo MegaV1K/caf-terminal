@@ -249,8 +249,10 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
 
 
 def run_registry_view():
-    """Displays and exports the CAF/CVE Portfolio (strictly max 20 assets) & Watchlist."""
+    """Displays and exports the CAF/CVE Portfolio (strictly max 20 assets) & Watchlist with Valuation Layer."""
     from src.database.registry import CAFRegistry
+    from src.scoring.valuation import ValuationEngine
+
     reg = CAFRegistry()
     active_portfolio = reg.get_active_portfolio()
     if not active_portfolio:
@@ -262,33 +264,56 @@ def run_registry_view():
     watchlist_count = len(all_assets) - len(active_portfolio)
     report_file = reg.generate_registry_markdown()
 
-    print("\n" + "=" * 90)
-    print("💼 АКТИВНЫЙ ИНВЕСТИЦИОННЫЙ ПОРТФЕЛЬ CAF / CVE (СТРОГО МАКСИМУМ 20 АКТИВОВ)")
-    print("=" * 90)
-    print("Правило Дарвина: индивидуальный целевой вес зависит от CVE Score с контролем кластеров.")
-    print("-" * 90)
-    print(f"{'Тикер':<8} {'Проект':<18} {'Уровень':<16} {'Вес %':<8} {'Score':<6} {'Кластер риска'}")
-    print("-" * 90)
-
+    # Calculate valuation ratings
+    val_ratings = []
     for a in active_portfolio:
-        score_str = f"{a['score']:.1f}" if a['score'] else "—"
-        name_short = (a['name'][:16] + "..") if len(a['name']) > 16 else a['name']
-        weight_str = f"{a['target_weight']:.1f}%" if a.get('target_weight') else "—"
-        cluster_name = a.get('cluster') or a.get('sector') or "—"
-        cluster_short = (cluster_name[:20] + "..") if len(cluster_name) > 20 else cluster_name
-        print(f"{a['symbol']:<8} {name_short:<18} {a['tier']:<16} {weight_str:<8} {score_str:<6} {cluster_short}")
+        vr = ValuationEngine.evaluate_entry(
+            symbol=a["symbol"],
+            name=a["name"],
+            tier=a["tier"],
+            cluster=a.get("cluster") or a.get("sector") or "",
+            fundamental_score=a["score"] or 70.0,
+            target_weight=a.get("target_weight") or 0.0,
+        )
+        val_ratings.append(vr)
 
-    total_weight = sum(a.get("target_weight", 0) or 0 for a in active_portfolio)
-    cash_reserve = max(0.0, round(100.0 - total_weight, 1))
+    total_target = sum(r.target_weight for r in val_ratings)
+    total_deployed = sum(r.deployed_weight for r in val_ratings)
+    total_dry_powder = sum(r.dry_powder_weight for r in val_ratings)
+    cash_reserve = max(0.0, round(100.0 - total_target, 1))
+    total_liquid = round(cash_reserve + total_dry_powder, 1)
 
-    print("-" * 90)
-    print(f"{'USDC':<8} {'Cash Reserve':<18} {'Reserve':<16} {cash_reserve:<5.1f}% {'100.0':<6} {'Liquidity Buffer'}")
-    print("=" * 90)
+    print("\n" + "=" * 115)
+    print("💼 ИНВЕСТИЦИОННЫЙ ПОРТФЕЛЬ CAF / CVE — 5-LAYER VALUATION & TACTICAL DEPLOYMENT")
+    print("=" * 115)
+    print("Разделение слоев: Фундаментальное качество (CVE) vs Оценка точки входа (Entry Score) & Сетки добора.")
+    print("-" * 115)
+    print(f"{'Тикер':<7} {'Проект':<15} {'Цена':<8} {'ATH DD':<8} {'CVE':<5} {'Entry':<6} {'Сигнал':<15} {'Цель %':<7} {'Развёрн.':<9} {'Резерв':<7} {'Зона добора'}")
+    print("-" * 115)
+
+    for vr in val_ratings:
+        p_str = f"${vr.current_price:,.2f}" if vr.current_price >= 1.0 else f"${vr.current_price:.3f}"
+        dd_str = f"{vr.ath_drawdown_pct:+.1f}%"
+        cve_str = f"{vr.fundamental_score:.1f}"
+        entry_str = f"{vr.entry_score:.1f}"
+        tgt_str = f"{vr.target_weight:.1f}%"
+        dep_str = f"{vr.deployed_weight:.1f}%"
+        dry_str = f"{vr.dry_powder_weight:.1f}%"
+        name_short = (vr.name[:13] + "..") if len(vr.name) > 13 else vr.name
+        zone_short = vr.buy_zones[0] if vr.buy_zones else "—"
+        print(f"{vr.symbol:<7} {name_short:<15} {p_str:<8} {dd_str:<8} {cve_str:<5} {entry_str:<6} {vr.entry_signal:<15} {tgt_str:<7} {dep_str:<9} {dry_str:<7} {zone_short}")
+
+    print("-" * 115)
+    print(f"{'USDC':<7} {'Cash Reserve':<15} {'$1.00':<8} {'0.0%':<8} {'100.0':<5} {'100.0':<6} {'STABLE_BUFFER':<15} {cash_reserve:<6.1f}% {cash_reserve:<8.1f}% {'0.0%':<7} Базовый буфер ликвидности")
+    print(f"{'USDC_DCA':<7} {'Tactical Reserve':<15} {'$1.00':<8} {'0.0%':<8} {'100.0':<5} {'—':<6} {'LIMIT_POWDER':<15} {total_dry_powder:<6.1f}% {'0.0%':<8} {total_dry_powder:<6.1f}% Отложенные лимитные сетки выкупа")
+    print("=" * 115)
     print(f"• Активов в активном портфеле: {len(active_portfolio)} / 20 (100% лимит)")
-    print(f"• Развёрнуто в альтах: {total_weight:.1f}% | Буфер кэша (USDC): {cash_reserve:.1f}%")
+    print(f"• Стратегический потолок альтов (Target): {total_target:.1f}% | Фактически развёрнуто сегодня: {total_deployed:.1f}%")
+    print(f"• Тактический Dry Powder под лимитные зоны: {total_dry_powder:.1f}% | Базовый кэш (USDC): {cash_reserve:.1f}%")
+    print(f"• Совокупная ликвидная подушка (USDC + Dry Powder): {total_liquid:.1f}%")
     print(f"• На скамье наблюдения (Watchlist): {watchlist_count} проектов")
     print(f"[OK] Полный реестр экспортирован в: {report_file}")
-    print("=" * 90)
+    print("=" * 115)
 
     # Optional Telegram Alert
     try:
