@@ -255,56 +255,38 @@ class CAFRegistry:
         """
         Enforces Darwinian selection rule:
         - Portfolio CANNOT have more than 20 assets.
-        - Core tier: top 6 assets (highest score) -> status='Portfolio'
-        - High Conviction tier: top 8 assets -> status='Portfolio'
-        - Incubator tier: top 6 assets -> status='Portfolio'
-        - All other assets and excess projects get status='Watchlist'.
+        - Rank 1..6 by score (min 80) -> Core tier (55% capital, ~9.1% each)
+        - Rank 7..14 by score (min 70) -> High Conviction tier (30% capital, ~3.75% each)
+        - Rank 15..20 by score (min 60) -> Incubator / Invest tier (15% capital, ~2.5% each)
+        - Rank 21+ and projects below threshold -> status='Watchlist'
         """
         displaced = []
         with self._get_conn() as conn:
             cur = conn.cursor()
 
-            # 1. Core candidates
+            # 1. Reset all to Watchlist initially
+            cur.execute("UPDATE assets SET status = 'Watchlist'")
+
+            # 2. Select candidates with valid score, excluding explicit Watch/Meme
             cur.execute("""
-                SELECT symbol, name, score FROM assets 
-                WHERE tier IN ('Core', 'Core Candidate')
+                SELECT symbol, name, score, tier FROM assets 
+                WHERE score IS NOT NULL AND score >= 60.0
                 ORDER BY score DESC, symbol ASC
             """)
-            cores = cur.fetchall()
-            for idx, row in enumerate(cores):
-                new_status = 'Portfolio' if idx < self.MAX_CORE_ASSETS else 'Watchlist'
-                if idx >= self.MAX_CORE_ASSETS:
-                    displaced.append({"symbol": row["symbol"], "tier": "Core", "displaced_to": "Watchlist"})
-                cur.execute("UPDATE assets SET status = ? WHERE symbol = ?", (new_status, row["symbol"]))
+            candidates = cur.fetchall()
 
-            # 2. High Conviction candidates
-            cur.execute("""
-                SELECT symbol, name, score FROM assets 
-                WHERE tier = 'High Conviction'
-                ORDER BY score DESC, symbol ASC
-            """)
-            high_conv = cur.fetchall()
-            for idx, row in enumerate(high_conv):
-                new_status = 'Portfolio' if idx < self.MAX_HIGH_CONV_ASSETS else 'Watchlist'
-                if idx >= self.MAX_HIGH_CONV_ASSETS:
-                    displaced.append({"symbol": row["symbol"], "tier": "High Conviction", "displaced_to": "Watchlist"})
-                cur.execute("UPDATE assets SET status = ? WHERE symbol = ?", (new_status, row["symbol"]))
-
-            # 3. Incubator candidates (Invest / Incubator)
-            cur.execute("""
-                SELECT symbol, name, score FROM assets 
-                WHERE tier IN ('Incubator', 'Invest')
-                ORDER BY score DESC, symbol ASC
-            """)
-            incubators = cur.fetchall()
-            for idx, row in enumerate(incubators):
-                new_status = 'Portfolio' if idx < self.MAX_INCUBATOR_ASSETS else 'Watchlist'
-                if idx >= self.MAX_INCUBATOR_ASSETS:
-                    displaced.append({"symbol": row["symbol"], "tier": "Incubator", "displaced_to": "Watchlist"})
-                cur.execute("UPDATE assets SET status = ? WHERE symbol = ?", (new_status, row["symbol"]))
-
-            # 4. Watch tier is always Watchlist
-            cur.execute("UPDATE assets SET status = 'Watchlist' WHERE tier = 'Watch'")
+            for idx, r in enumerate(candidates):
+                sym = r["symbol"]
+                sc = r["score"] or 0
+                if idx < self.MAX_CORE_ASSETS and sc >= 80.0:
+                    cur.execute("UPDATE assets SET status = 'Portfolio', tier = 'Core' WHERE symbol = ?", (sym,))
+                elif idx < (self.MAX_CORE_ASSETS + self.MAX_HIGH_CONV_ASSETS) and sc >= 70.0:
+                    cur.execute("UPDATE assets SET status = 'Portfolio', tier = 'High Conviction' WHERE symbol = ?", (sym,))
+                elif idx < self.MAX_ACTIVE_PORTFOLIO and sc >= 60.0:
+                    cur.execute("UPDATE assets SET status = 'Portfolio', tier = 'Invest' WHERE symbol = ?", (sym,))
+                else:
+                    displaced.append({"symbol": sym, "score": sc, "displaced_to": "Watchlist"})
+                    cur.execute("UPDATE assets SET status = 'Watchlist' WHERE symbol = ?", (sym,))
 
             conn.commit()
 
