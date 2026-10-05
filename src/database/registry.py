@@ -73,22 +73,22 @@ class CAFRegistry:
                 )
             """)
 
-            # 3. Migrate existing DBs: add PnL columns if they don't exist
+            # 3. Migrate existing DBs: add PnL and allocation columns if they don't exist
             existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(assets)")}
-            pnl_cols = {
+            extra_cols = {
                 "entry_price":   "REAL",
                 "entry_date":    "TEXT",
                 "target_price":  "REAL",
                 "current_price": "REAL",
                 "pnl_pct":       "REAL",
+                "target_weight": "REAL",
+                "cluster":       "TEXT",
             }
-            for col, col_type in pnl_cols.items():
+            for col, col_type in extra_cols.items():
                 if col not in existing_cols:
                     cur.execute(f"ALTER TABLE assets ADD COLUMN {col} {col_type}")
 
             conn.commit()
-
-
 
     def upsert_asset(
         self,
@@ -100,14 +100,16 @@ class CAFRegistry:
         counter_thesis: str = "",
         score: Optional[float] = None,
         status: str = "Active",
+        target_weight: Optional[float] = None,
+        cluster: str = "",
     ) -> None:
         """Adds or updates an asset in the registry."""
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_conn() as conn:
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO assets (symbol, name, sector, tier, thesis, counter_thesis, score, status, last_reviewed, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO assets (symbol, name, sector, tier, thesis, counter_thesis, score, status, last_reviewed, updated_at, target_weight, cluster)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     name = excluded.name,
                     sector = CASE WHEN excluded.sector != '' THEN excluded.sector ELSE assets.sector END,
@@ -117,8 +119,10 @@ class CAFRegistry:
                     score = COALESCE(excluded.score, assets.score),
                     status = excluded.status,
                     last_reviewed = excluded.last_reviewed,
-                    updated_at = excluded.updated_at
-            """, (symbol.upper(), name, sector, tier, thesis, counter_thesis, score, status, now_str, now_str))
+                    updated_at = excluded.updated_at,
+                    target_weight = COALESCE(excluded.target_weight, assets.target_weight),
+                    cluster = CASE WHEN excluded.cluster != '' THEN excluded.cluster ELSE assets.cluster END
+            """, (symbol.upper(), name, sector, tier, thesis, counter_thesis, score, status, now_str, now_str, target_weight, cluster))
             conn.commit()
 
     def update_price(
@@ -267,23 +271,28 @@ class CAFRegistry:
             # 1. Reset all to Watchlist initially
             cur.execute("UPDATE assets SET status = 'Watchlist'")
 
-            # 2. Select candidates with valid score, excluding explicit Watch/Meme
+            # 2. Select candidates with valid score, excluding explicit Watch
             cur.execute("""
-                SELECT symbol, name, score, tier FROM assets 
-                WHERE score IS NOT NULL AND score >= 60.0
-                ORDER BY score DESC, symbol ASC
+                SELECT symbol, name, score, tier, target_weight FROM assets 
+                WHERE score IS NOT NULL AND tier != 'Watch'
+                ORDER BY 
+                    CASE tier 
+                        WHEN 'Core' THEN 1 
+                        WHEN 'Core Candidate' THEN 2 
+                        WHEN 'High Conviction' THEN 3 
+                        WHEN 'Invest' THEN 4 
+                        WHEN 'Incubator' THEN 5 
+                        ELSE 6 
+                    END,
+                    score DESC, symbol ASC
             """)
             candidates = cur.fetchall()
 
             for idx, r in enumerate(candidates):
                 sym = r["symbol"]
                 sc = r["score"] or 0
-                if idx < self.MAX_CORE_ASSETS and sc >= 80.0:
-                    cur.execute("UPDATE assets SET status = 'Portfolio', tier = 'Core' WHERE symbol = ?", (sym,))
-                elif idx < (self.MAX_CORE_ASSETS + self.MAX_HIGH_CONV_ASSETS) and sc >= 70.0:
-                    cur.execute("UPDATE assets SET status = 'Portfolio', tier = 'High Conviction' WHERE symbol = ?", (sym,))
-                elif idx < self.MAX_ACTIVE_PORTFOLIO and sc >= 60.0:
-                    cur.execute("UPDATE assets SET status = 'Portfolio', tier = 'Invest' WHERE symbol = ?", (sym,))
+                if idx < self.MAX_ACTIVE_PORTFOLIO:
+                    cur.execute("UPDATE assets SET status = 'Portfolio' WHERE symbol = ?", (sym,))
                 else:
                     displaced.append({"symbol": sym, "score": sc, "displaced_to": "Watchlist"})
                     cur.execute("UPDATE assets SET status = 'Watchlist' WHERE symbol = ?", (sym,))
@@ -340,8 +349,8 @@ class CAFRegistry:
     def seed_from_conversation(self, clear_existing: bool = True) -> int:
         """
         Seeds registry with modern October 2026 CAF/CVE investment portfolio from scratch.
-        Strictly eliminates legacy zombie tokens (COMP, IOTA, NEO, etc.) and focuses on
-        real revenue, buyback & burn, DePIN cash flow, and modern high-throughput winners.
+        Implements dynamic risk-adjusted target weights, correlation cluster caps,
+        and eliminates all legacy zombie tokens.
         """
         if clear_existing:
             with self._get_conn() as conn:
@@ -349,47 +358,47 @@ class CAFRegistry:
                 conn.commit()
 
         initial_projects = [
-            # 1. CORE TIER (55% Capital, 6 Assets, Target Score >= 86.0)
-            ("HYPE", "Hyperliquid", "Perp DEX / Sovereign L1", "Core", "Крупнейший ончейн-ордербук бессрочных фьючерсов с суверенным L1, рекордный ончейн-кэшфлоу ($500M+ годовых сборов), 100% честное распределение без хищнических венчурных анлоков", "Риск регуляторного давления на бессрочные деривативы и децентрализацию валидаторов", 89.5),
-            ("AAVE", "Aave", "DeFi Lending Monopoly", "Core", "Абсолютный гегемон кредитования в Web3 (TVL > $20B), запуск fee switch и регулярный buyback AAVE с рынка из сборов протокола", "Риск появления протоколов с изолированной ликвидностью нового поколения (Fluid, Morpho)", 88.5),
-            ("TAO", "Bittensor", "Decentralized AI / Subnets", "Core", "Базовый децентрализованный товарный слой машинного интеллекта, экономика соревновательных субсетей для AI обучения и инференса", "Высокая сложность архитектуры субсетей и зависимость от качества конкретных AI-решений", 88.0),
-            ("AKT", "Akash Network", "DePIN / GPU Cloud", "Core", "Работающий прибыльный DePIN маркетплейс GPU для AI вычислений с подтвержденной выручкой и сжиганием токенов через settlement", "Конкуренция с централизованными Web2 облаками (Lambda, CoreWeave) и доступность новейших чипов", 87.5),
-            ("RAY", "Raydium", "Solana DEX Infra", "Core", "Доминирующий генератор ончейн-комиссий в экосистеме Solana ($1M–$3M daily fees), непрерывный байбэк и сжигание RAY", "Зависимость от объемов спекулятивной активности в экосистеме Solana", 86.5),
-            ("JUP", "Jupiter", "Solana Super-App / DEX", "Core", "Финансовый хаб Solana (маршрутизация 70%+ объема), DEX + Perps + JupUSD, программа Active Staking Rewards (ASR) с распределением комиссий", "Риск снижения активности на Solana и давление от распределения ASR наград", 86.0),
+            # 1. CORE TIER (50.0% Capital, 6 Assets, Range: 6.0% - 10.5%)
+            ("HYPE", "Hyperliquid", "Perp DEX / Sovereign L1", "Sovereign L1 / CLOB", "Core", "Крупнейший ончейн-ордербук бессрочных фьючерсов с суверенным L1, рекордный ончейн-кэшфлоу ($500M+ годовых сборов), Assistance Fund выкупает HYPE с открытого рынка, 0% венчурных анлоков", "Риск регуляторного давления на деривативы и децентрализацию валидаторов", 89.5, 10.5),
+            ("AAVE", "Aave", "DeFi Lending Monopoly", "Ethereum DeFi / Lending", "Core", "Абсолютный гегемон кредитования в Web3 (TVL > $20B), запущенный fee switch и действующая программа выкупа AAVE из протокольной выручки до $50M/год с еженедельными покупками", "Риск появления протоколов с изолированной ликвидностью нового поколения (Fluid, Morpho)", 88.5, 10.0),
+            ("TAO", "Bittensor", "Decentralized AI / Subnets", "AI & Compute", "Core", "Базовый товарный слой машинного интеллекта, halving пройден в декабре 2025 (эмиссия 0.5 TAO/блок, max 21M TAO), лидер децентрализованного AI", "Сложность субсетей и зависимость от качества конкретных решений", 88.0, 9.0),
+            ("AKT", "Akash Network", "DePIN / GPU Cloud", "AI & Compute", "Core", "Работающий прибыльный DePIN маркетплейс GPU для AI вычислений с подтвержденной выручкой и сжиганием токенов через settlement", "Конкуренция с централизованными Web2 облаками (Lambda, CoreWeave)", 87.5, 8.0),
+            ("RAY", "Raydium", "Solana DEX Infra", "Solana Ecosystem", "Core", "Доминирующий генератор ончейн-комиссий в экосистеме Solana ($1M–$3M daily fees), непрерывный байбэк и сжигание RAY (вес и оценка скорректированы с учетом цикличности розничного объема)", "Высокая цикличность и зависимость от спекулятивного объема Solana", 82.5, 6.5),
+            ("JUP", "Jupiter", "Solana Super-App / DEX", "Solana Ecosystem", "Core", "Финансовый хаб Solana (маршрутизация 70%+ объема), DEX + Perps + JupUSD, программа Active Staking Rewards (ASR) (оценка скорректирована, так как 70% buyback остается на стадии governance-предложения)", "Риск снижения активности на Solana и статус buyback на уровне governance", 81.5, 6.0),
 
-            # 2. HIGH CONVICTION TIER (30% Capital, 8 Assets, Target Score 80.0 - 85.0)
-            ("SUI", "Sui", "Layer 1 Move", "High Conviction", "Самый быстрорастущий L1 нового поколения на языке Move, высокая реальная пропускная способность, институциональный приток ликвидности", "График инфляционных разблокировок токенов для ранних инвесторов", 84.5),
-            ("PENDLE", "Pendle Finance", "Yield Stripping / DeFi", "High Conviction", "Монополия на рынке торговли и фиксации ончейн-доходности, ключевой строительный блок ликвидного стейкинга и RWA", "Зависимость от циклов доходности на более широком рынке DeFi", 83.5),
-            ("ONDO", "Ondo Finance", "RWA / Tokenized Treasuries", "High Conviction", "Безоговорочный лидер сектора RWA, интеграция с BlackRock BUIDL, токенизация казначейских векселей США институционального масштаба", "Жесткие регуляторные требования SEC к ценным бумагам и юрисдикционные барьеры", 83.0),
-            ("ENA", "Ethena", "Synthetic Dollar / Basis Trade", "High Conviction", "Высокодоходный синтетический доллар USDe, генерирующий колоссальные сборы на базисной торговле бессрочными фьючерсами", "Риск отрицательных ставок фандинга (negative funding rate) на медвежьем рынке", 82.5),
-            ("GRASS", "Grass", "DePIN / AI Web Scraping", "High Conviction", "Крупнейшая пользовательская DePIN сеть для сбора и валидации чистых веб-данных для обучения LLM, прямые B2B контракты", "Юридические риски сбора веб-данных и удержание миллионов операторов нод", 82.0),
-            ("GEOD", "GEODNET", "DePIN / RTK Positioning", "High Conviction", "Глобальная сеть базовых станций высокоточного GNSS позиционирования, реальная коммерческая выручка, механизм buyback & burn", "Скорость физического развертывания наземных станций в отдаленных регионах", 81.5),
-            ("TRAC", "OriginTrail", "Decentralized Knowledge Graph", "High Conviction", "Децентрализованный граф знаний (DKG) для проверяемого AI и верификации фактов, корпоративные интеграции (BSI, GS1)", "Медленный цикл продаж в традиционном enterprise-секторе", 80.5),
-            ("RENDER", "Render Network", "DePIN / GPU Rendering & AI", "High Conviction", "Лидер децентрализованного рендеринга и AI вычислений на Solana, модель Burn-and-Mint Equilibrium (BME)", "Волатильность спроса на рендеринг и конкуренция со стороны централизованных рендер-ферм", 80.0),
+            # 2. HIGH CONVICTION TIER (33.5% Capital, 9 Assets, Range: 2.0% - 5.0%)
+            ("SUI", "Sui", "Layer 1 Move", "Sui Ecosystem", "High Conviction", "Самый быстрорастущий L1 нового поколения на языке Move, высокая реальная пропускная способность, институциональный приток ликвидности и сетевой эффект", "График инфляционных разблокировок токенов до 2030 года", 84.5, 5.0),
+            ("TRAC", "OriginTrail", "Decentralized Knowledge Graph", "Knowledge / AI Data", "High Conviction", "Фиксированный supply 500M, 0% инфляции, 100% в обращении, ~20% заблокировано в DKG нодах под утилити, проверенная корпоративная выручка (BSI, GS1)", "Медленный цикл продаж в традиционном enterprise-секторе", 84.0, 4.5),
+            ("PENDLE", "Pendle Finance", "Yield Stripping / DeFi", "DeFi Yield Trading", "High Conviction", "Монополия на рынке торговли и фиксации ончейн-доходности, ключевой строительный блок институционального ликвидного стейкинга и RWA", "Зависимость от циклов доходности на более широком рынке DeFi", 83.5, 4.5),
+            ("ONDO", "Ondo Finance", "RWA / Tokenized Treasuries", "RWA", "High Conviction", "Безоговорочный лидер сектора RWA, интеграция с BlackRock BUIDL, токенизация казначейских векселей США институционального масштаба", "Регуляторные требования SEC к ценным бумагам", 83.0, 4.0),
+            ("GEOD", "GEODNET", "DePIN / RTK Positioning", "DePIN Physical Infra", "High Conviction", "Крупнейшая RTK GNSS сеть базовых станций, продажа данных корпоративным клиентам -> реальный buyback & burn токенов GEOD", "Более узкий нишевый рынок по сравнению с общими вычислениями", 83.0, 4.0),
+            ("FLUID", "Fluid (Instadapp)", "DeFi Liquidity Layer", "Ethereum DeFi / Lending", "High Conviction", "Масштаб $3.6B market size, $1.6B loans, $18.1B H1 volume, запущенный reserve/buyback механизм, агрегированный слой кредитования", "Конкуренция с устоявшимися пулами Aave", 82.0, 3.5),
+            ("ENA", "Ethena", "Synthetic Dollar / Basis Trade", "DeFi Synthetic Dollar", "High Conviction", "Синтетический доллар USDe, генерирующий масштабные сборы на базисной торговле бессрочными фьючерсами", "Риск отрицательных ставок фандинга (negative funding rate) на затяжном спаде", 81.5, 3.0),
+            ("RENDER", "Render Network", "DePIN / GPU Rendering & AI", "AI & Compute", "High Conviction", "Лидер децентрализованного рендеринга и AI вычислений на Solana, дефляционная BME модель токена", "Волатильность спроса на рендеринг и конкуренция с централизованными рендер-фермами", 80.0, 3.0),
+            ("GRASS", "Grass", "DePIN / AI Web Scraping", "AI & Compute", "High Conviction", "Крупнейшая пользовательская DePIN сеть для сбора веб-данных для обучения LLM (оценка и вес скорректированы вниз из-за тяжелого графика разблокировок до 2030 года)", "Значительный supply overhang и инфляционные разблокировки до 2030 года", 78.5, 2.0),
 
-            # 3. INCUBATOR / EMERGING TIER (15% Capital, 6 Assets, Target Score 74.0 - 79.0)
-            ("DEEP", "DeepBook Protocol", "CLOB DEX Infra", "Invest", "Центральная книга лимитных ордеров Sui, нативная интеграция в блокчейн, 100% сжигание сборов тейкеров", "Полная прямая зависимость от объема торгов внутри блокчейна Sui", 78.5),
-            ("FLUID", "Fluid (Instadapp)", "DeFi Liquidity Layer", "Invest", "Инновационный агрегированный слой кредитования и DEX с рекордной капиталоэффективностью пулов ликвидности", "Жесткая конкуренция с монополистами кредитования (Aave, Morpho)", 78.0),
-            ("DRIFT", "Drift Protocol", "Solana Perps & Prediction", "Invest", "Ведущая DEX бессрочных фьючерсов и рынков предсказаний на Solana, кросс-маржинальная архитектура", "Конкуренция с централизованными биржами и Hyperliquid", 76.5),
-            ("ATH", "Aethir", "DePIN / Enterprise Cloud", "Invest", "Корпоративная распределенная сеть мощных GPU для облачного гейминга и AI inference с институциональными контрактами", "Навес будущих разблокировок токенов и инфляция наград нодам", 75.5),
-            ("INJ", "Injective", "Financial L1 / CLOB", "Invest", "Сверхбыстрый финансовый L1 с непрерывным еженедельным ончейн-аукционом сжигания токенов из сборов экосистемных dApps", "Конкуренция за ликвидность с L1 общего назначения (Solana, Sui)", 75.0),
-            ("KMNO", "Kamino Finance", "Solana DeFi Liquidity", "Invest", "Ключевой автоматизированный движок ликвидности и кредитования на Solana (K-Lend, Multiply vaults)", "Умеренный прямой захват ценности токеном на текущем этапе", 74.0),
+            # 3. INCUBATOR TIER (9.5% Capital, 5 Assets, Range: 1.5% - 2.5%)
+            ("INJ", "Injective", "Financial L1 / CLOB", "Sovereign L1 / CLOB", "Invest", "100% токенов в обращении, 0 будущих разблокировок, еженедельный ончейн-аукцион сжигания 60% комиссий экосистемных dApps", "Конкуренция за ликвидность с Solana и L2", 79.5, 2.5),
+            ("DEEP", "DeepBook Protocol", "CLOB DEX Infra", "Sui Ecosystem", "Invest", "Центральная книга лимитных ордеров Sui, нативная интеграция в блокчейн, 100% сжигание сборов тейкеров", "Полная прямая зависимость от объема торгов внутри блокчейна Sui", 78.5, 2.0),
+            ("DRIFT", "Drift Protocol", "Solana Perps & Prediction", "Solana Ecosystem", "Invest", "Ведущая DEX бессрочных фьючерсов и рынков предсказаний на Solana, кросс-маржинальная архитектура", "Конкуренция с централизованными биржами и Hyperliquid", 76.5, 2.0),
+            ("ATH", "Aethir", "DePIN / Enterprise Cloud", "AI & Compute", "Invest", "Корпоративная распределенная сеть мощных GPU (вес снижен для ограничения перегрузки AI/compute кластера)", "Навес будущих разблокировок токенов и инфляция наград нодам", 74.0, 1.5),
+            ("KMNO", "Kamino Finance", "Solana DeFi Liquidity", "Solana Ecosystem", "Invest", "Ключевой автоматизированный движок ликвидности и кредитования на Solana (K-Lend, Multiply vaults)", "Умеренный прямой захват ценности токеном на текущем этапе", 74.0, 1.5),
 
-            # 4. WATCHLIST / EMERGING RADAR (Резервная скамья — перспективные инфраструктурные активы)
-            ("SOL", "Solana", "High-Throughput L1", "Watch", "Базовый L1 высокой пропускной способности, ядро розничной ликвидности и DePIN активности", "Эмиссия инфляционных наград валидаторам", 73.0),
-            ("NEAR", "NEAR Protocol", "AI & Chain Abstraction L1", "Watch", "Ведущий блокчейн в нарративе User-Owned AI и абстракции чейнов", "Конкуренция за разработчиков dApps", 72.0),
-            ("PYTH", "Pyth Network", "Low-Latency Oracle Infra", "Watch", "Высокочастотные ценовые оракулы первого уровня для DeFi и деривативов", "Зависимость ценности токена от модели стейкинга", 71.5),
-            ("JTO", "Jito Network", "Solana MEV & Liquid Staking", "Watch", "Монополист MEV-клиента и крупнейший LST-протокол на Solana", "Governance-heavy модель распределения наград", 71.0),
-            ("MORPHO", "Morpho Labs", "Modular Lending Primitive", "Watch", "Модульный протокол изолированных кредитных рынков нового поколения", "Конкуренция с устоявшимися пулами Aave", 70.5),
-            ("EIGEN", "EigenLayer", "Ethereum Restaking Infra", "Watch", "Базовый протокол коллективной криптоэкономической безопасности через restaking", "Медленный запуск монетизации AVS сервисов", 70.0),
-            ("SAFE", "Safe", "Account Abstraction Infra", "Watch", "Стандарт мультисиг и смарт-аккаунтов институционального уровня", "Медленная трансляция сетевого эффекта в стоимость токена", 69.0),
-            ("SEI", "Sei Network", "Parallelized EVM L1", "Watch", "Параллелизованный EVM первого уровня с высокой скоростью финализации", "Необходимость формирования устойчивого DeFi ландшафта", 68.5),
-            ("TIA", "Celestia", "Modular DA Layer", "Watch", "Пионер модульной архитектуры и доступности данных (Data Availability)", "Крупные разблокировки токенов для ранних фондов", 67.0),
-            ("W", "Wormhole", "Cross-chain Messaging Infra", "Watch", "Инфраструктурный стандарт кроссчейн-коммуникации и передачи сообщений", "Низкий захват ценности токеном при высоком FDV", 65.0),
+            # 4. WATCHLIST / RADAR (10 активов, вес 0.0%)
+            ("SOL", "Solana", "High-Throughput L1", "Solana Ecosystem", "Watch", "Базовый L1 высокой пропускной способности, ядро розничной ликвидности и DePIN активности", "Эмиссия инфляционных наград валидаторам", 73.0, 0.0),
+            ("NEAR", "NEAR Protocol", "AI & Chain Abstraction L1", "AI & Compute", "Watch", "Ведущий блокчейн в нарративе User-Owned AI и абстракции чейнов", "Конкуренция за разработчиков dApps", 72.0, 0.0),
+            ("PYTH", "Pyth Network", "Low-Latency Oracle Infra", "Solana Ecosystem", "Watch", "Высокочастотные ценовые оракулы первого уровня для DeFi и деривативов", "Зависимость ценности токена от модели стейкинга", 71.5, 0.0),
+            ("JTO", "Jito Network", "Solana MEV & Liquid Staking", "Solana Ecosystem", "Watch", "Монополист MEV-клиента и крупнейший LST-протокол на Solana", "Governance-heavy модель распределения наград", 71.0, 0.0),
+            ("MORPHO", "Morpho Labs", "Modular Lending Primitive", "Ethereum DeFi / Lending", "Watch", "Модульный протокол изолированных кредитных рынков нового поколения", "Конкуренция с устоявшимися пулами Aave", 70.5, 0.0),
+            ("EIGEN", "EigenLayer", "Ethereum Restaking Infra", "Ethereum DeFi / Lending", "Watch", "Базовый протокол коллективной криптоэкономической безопасности через restaking", "Медленный запуск монетизации AVS сервисов", 70.0, 0.0),
+            ("SAFE", "Safe", "Account Abstraction Infra", "Ethereum DeFi / Lending", "Watch", "Стандарт мультисиг и смарт-аккаунтов институционального уровня", "Медленная трансляция сетевого эффекта в стоимость токена", 69.0, 0.0),
+            ("SEI", "Sei Network", "Parallelized EVM L1", "Other L1", "Watch", "Параллелизованный EVM первого уровня с высокой скоростью финализации", "Необходимость формирования устойчивого DeFi ландшафта", 68.5, 0.0),
+            ("TIA", "Celestia", "Modular DA Layer", "Modular Infra", "Watch", "Пионер модульной архитектуры и доступности данных (Data Availability)", "Крупные разблокировки токенов для ранних фондов", 67.0, 0.0),
+            ("W", "Wormhole", "Cross-chain Messaging Infra", "Cross-chain Infra", "Watch", "Инфраструктурный стандарт кроссчейн-коммуникации и передачи сообщений", "Низкий захват ценности токеном при высоком FDV", 65.0, 0.0),
         ]
 
         count = 0
-        for symbol, name, sector, tier, thesis, cthesis, score in initial_projects:
+        for symbol, name, sector, cluster, tier, thesis, cthesis, score, weight in initial_projects:
             self.upsert_asset(
                 symbol=symbol,
                 name=name,
@@ -399,11 +408,26 @@ class CAFRegistry:
                 counter_thesis=cthesis,
                 score=score,
                 status="Active" if tier != "Watch" else "Watchlist",
+                target_weight=weight,
+                cluster=cluster,
             )
             count += 1
 
         self.enforce_portfolio_limit()
         return count
+
+    def get_cluster_exposure(self) -> Dict[str, float]:
+        """Calculates total allocation percentage per risk cluster."""
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT cluster, SUM(COALESCE(target_weight, 0)) as total_weight
+                FROM assets
+                WHERE status = 'Portfolio' AND cluster IS NOT NULL AND cluster != ''
+                GROUP BY cluster
+                ORDER BY total_weight DESC
+            """)
+            return {row["cluster"]: round(row["total_weight"], 2) for row in cur.fetchall()}
 
     def generate_registry_markdown(self) -> Path:
         """Exports the entire portfolio registry into clean GitHub-flavored Markdown."""
@@ -415,17 +439,22 @@ class CAFRegistry:
         all_assets = self.get_all_assets()
         watchlist = [a for a in all_assets if a["status"] != "Portfolio"]
         decisions = self.get_decisions(limit=10)
+        clusters = self.get_cluster_exposure()
+
+        total_active_weight = sum(a.get("target_weight", 0) or 0 for a in active_portfolio)
+        cash_reserve_weight = max(0.0, round(100.0 - total_active_weight, 1))
 
         lines = [
-            "# CAF / CVE Portfolio & Incubator Registry",
+            "# CAF / CVE Portfolio & Incubator Registry (Institutional Architecture)",
             f"**Дата актуализации:** {now_str}  ",
             f"**Активов в активном портфеле:** {len(active_portfolio)} / {self.MAX_ACTIVE_PORTFOLIO} (Лимит: 20)  ",
+            f"**Развёрнутый капитал в альтах:** {total_active_weight:.1f}% | **Буфер ликвидности (Cash / USDC):** {cash_reserve_weight:.1f}%  ",
             f"**Активов в списке наблюдения (Watchlist):** {len(watchlist)}  ",
             "",
-            "## 💼 1. Активный инвестиционный портфель (Лимит: 20 активов)",
-            "Правило Дарвина: при входе нового проекта с высоким баллом худший проект вытесняется в Watchlist.",
+            "## 💼 1. CAF Altcoin Alpha Sleeve (100% Мандат на Альткоины)",
+            "Правило Дарвина: индивидуальный целевой вес определяется силой CVE Score внутри тир-диапазона с контролем кластерных лимитов.",
             "",
-            "| Тикер | Проект | Сектор | Уровень | Целевая доля | Score | Тезис / Обоснование |",
+            "| Тикер | Проект | Кластер риска | Уровень | Целевой вес % | Score | Тезис / Обоснование |",
             "|---|---|---|---|---|---|---|",
         ]
 
@@ -438,27 +467,58 @@ class CAFRegistry:
             "Watch": "⚪ **WATCH**",
         }
 
-        tier_allocations = {
-            "Core": "~9.1% (55% пул)",
-            "Core Candidate": "~9.1% (55% пул)",
-            "High Conviction": "~3.75% (30% пул)",
-            "Invest": "~2.5% (15% пул)",
-            "Incubator": "~2.5% (15% пул)",
-        }
-
         for a in active_portfolio:
             badge = tier_badges.get(a["tier"], a["tier"])
-            alloc = tier_allocations.get(a["tier"], "—")
+            weight_str = f"**{a['target_weight']:.1f}%**" if a.get("target_weight") else "—"
             score_str = f"**{a['score']:.1f}**" if a["score"] else "—"
             thesis_short = (a["thesis"][:80] + "...") if a["thesis"] and len(a["thesis"]) > 80 else (a["thesis"] or "—")
+            cluster_name = a.get("cluster") or a.get("sector") or "—"
             lines.append(
-                f"| `{a['symbol']}` | **{a['name']}** | {a['sector']} | {badge} | **{alloc}** | {score_str} | {thesis_short} |"
+                f"| `{a['symbol']}` | **{a['name']}** | {cluster_name} | {badge} | {weight_str} | {score_str} | {thesis_short} |"
             )
 
         lines += [
             "",
+            f"| `USDC` | **Cash Reserve** | Liquidity Buffer | 🛡️ **RESERVE** | **{cash_reserve_weight:.1f}%** | 100.0 | Тактический резерв для выкупа просадок и новых сигналов Комитета |",
+            "",
             "---",
-            f"## 📋 2. Резервная скамья и наблюдение (Watchlist — {len(watchlist)} активов)",
+            "## 🛡️ 2. Контроль Концентрации и Кластерных Лимитов (Cluster Risk Caps)",
+            "| Кластер риска | Текущий вес | Лимит риска | Статус контроля | Активы кластера |",
+            "|---|---|---|---|---|",
+        ]
+
+        cluster_limits = {
+            "AI & Compute": (24.0, "TAO, AKT, RENDER, GRASS, ATH"),
+            "Solana Ecosystem": (20.0, "RAY, JUP, DRIFT, KMNO"),
+            "Ethereum DeFi / Lending": (25.0, "AAVE, FLUID"),
+            "Sovereign L1 / CLOB": (15.0, "HYPE, INJ"),
+            "RWA": (10.0, "ONDO"),
+            "DePIN Physical Infra": (10.0, "GEOD"),
+            "DeFi Yield Trading": (10.0, "PENDLE"),
+            "Sui Ecosystem": (8.0, "SUI, DEEP"),
+            "Knowledge / AI Data": (10.0, "TRAC"),
+            "DeFi Synthetic Dollar": (8.0, "ENA"),
+        }
+
+        for c_name, c_weight in clusters.items():
+            cap, assets_str = cluster_limits.get(c_name, (20.0, "—"))
+            status = "✅ В пределах лимита" if c_weight <= cap else "⚠️ ПРЕВЫШЕНИЕ"
+            lines.append(f"| **{c_name}** | **{c_weight:.1f}%** | $\\le {cap:.1f}\\%$ | {status} | {assets_str} |")
+
+        lines += [
+            "",
+            "---",
+            "## 🌐 3. Институциональный Macro-Портфель (Total Crypto Portfolio)",
+            "Если CAF управляет **всем совокупным криптокапиталом**, базовый слой формируют монетарный якорь BTC и расчетная инфраструктура ETH:",
+            "",
+            "| Компонент | Роль в балансе | Доля от капитала | Активы и стратегия |",
+            "|---|---|---|---|",
+            "| 🥇 **Macro Core Anchor** | Монетарный резерв и базовый L1 | **45.0%** | **BTC (35.0%)** + **ETH (10.0%)** — минимальный бета-риск, защита капитала |",
+            "| 🚀 **CAF Alpha Sleeve** | Генерация избыточной доходности | **50.0%** | 20 активов CAF (вес каждого актива = 50% от веса в Altcoin Sleeve) |",
+            "| 💵 **Tactical Cash** | Буфер ликвидности | **5.0%** | **USDC / USDT** — тактический резерв под ребалансировку и волатильность |",
+            "",
+            "---",
+            f"## 📋 4. Резервная скамья и наблюдение (Watchlist — {len(watchlist)} активов)",
             "",
             "| Тикер | Проект | Сектор | Уровень CVE | Score | Причина нахождения в резерве |",
             "|---|---|---|---|---|---|",
@@ -471,6 +531,9 @@ class CAFRegistry:
             lines.append(
                 f"| `{a['symbol']}` | {a['name']} | {a['sector']} | {badge} | {score_str} | {reason} |"
             )
+
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        return report_path
 
         if decisions:
             lines += [

@@ -262,34 +262,33 @@ def run_registry_view():
     watchlist_count = len(all_assets) - len(active_portfolio)
     report_file = reg.generate_registry_markdown()
 
-    print("\n" + "=" * 85)
+    print("\n" + "=" * 90)
     print("💼 АКТИВНЫЙ ИНВЕСТИЦИОННЫЙ ПОРТФЕЛЬ CAF / CVE (СТРОГО МАКСИМУМ 20 АКТИВОВ)")
-    print("=" * 85)
-    print("Правило Дарвина: новые победители вытесняют слабейшие активы в Watchlist.")
-    print("-" * 85)
-    print(f"{'Тикер':<8} {'Проект':<20} {'Уровень':<16} {'Доля пула':<12} {'Score':<6} {'Сектор'}")
-    print("-" * 85)
-
-    tier_allocations = {
-        "Core": "~9.1% (55%)",
-        "Core Candidate": "~9.1% (55%)",
-        "High Conviction": "~3.75% (30%)",
-        "Invest": "~2.5% (15%)",
-        "Incubator": "~2.5% (15%)",
-    }
+    print("=" * 90)
+    print("Правило Дарвина: индивидуальный целевой вес зависит от CVE Score с контролем кластеров.")
+    print("-" * 90)
+    print(f"{'Тикер':<8} {'Проект':<18} {'Уровень':<16} {'Вес %':<8} {'Score':<6} {'Кластер риска'}")
+    print("-" * 90)
 
     for a in active_portfolio:
         score_str = f"{a['score']:.1f}" if a['score'] else "—"
-        name_short = (a['name'][:18] + "..") if len(a['name']) > 18 else a['name']
-        alloc = tier_allocations.get(a['tier'], "—")
-        sec_short = (a['sector'][:18] + "..") if a['sector'] and len(a['sector']) > 18 else (a['sector'] or "—")
-        print(f"{a['symbol']:<8} {name_short:<20} {a['tier']:<16} {alloc:<12} {score_str:<6} {sec_short}")
+        name_short = (a['name'][:16] + "..") if len(a['name']) > 16 else a['name']
+        weight_str = f"{a['target_weight']:.1f}%" if a.get('target_weight') else "—"
+        cluster_name = a.get('cluster') or a.get('sector') or "—"
+        cluster_short = (cluster_name[:20] + "..") if len(cluster_name) > 20 else cluster_name
+        print(f"{a['symbol']:<8} {name_short:<18} {a['tier']:<16} {weight_str:<8} {score_str:<6} {cluster_short}")
 
-    print("\n" + "=" * 85)
+    total_weight = sum(a.get("target_weight", 0) or 0 for a in active_portfolio)
+    cash_reserve = max(0.0, round(100.0 - total_weight, 1))
+
+    print("-" * 90)
+    print(f"{'USDC':<8} {'Cash Reserve':<18} {'Reserve':<16} {cash_reserve:<5.1f}% {'100.0':<6} {'Liquidity Buffer'}")
+    print("=" * 90)
     print(f"• Активов в активном портфеле: {len(active_portfolio)} / 20 (100% лимит)")
+    print(f"• Развёрнуто в альтах: {total_weight:.1f}% | Буфер кэша (USDC): {cash_reserve:.1f}%")
     print(f"• На скамье наблюдения (Watchlist): {watchlist_count} проектов")
     print(f"[OK] Полный реестр экспортирован в: {report_file}")
-    print("=" * 85)
+    print("=" * 90)
 
     # Optional Telegram Alert
     try:
