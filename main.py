@@ -323,8 +323,32 @@ def run_set_price(symbol: str, entry: float = None, current: float = None, targe
     run_pnl_view()
 
 
+def run_weekly_cycle(top_n: int = 20, candidates: int = 5, force_refresh: bool = False):
+    """Executes the complete weekly investment cycle: Radar Top 20 + Committee."""
+    print("\n" + "=" * 70)
+    print("🗓️ ЕЖЕНЕДЕЛЬНЫЙ ИНВЕСТИЦИОННЫЙ ЦИКЛ CAF-TERMINAL")
+    print("=" * 70)
+    print("1. Поиск ТОП-20 Emerging / Incubator проектов на радаре")
+    print("2. Заседание 3-агентного Инвестиционного Комитета по топ-сигналам")
+    print("3. Обновление базы данных портфеля и реестра")
+    print("4. Отправка дайджеста в Telegram")
+    print("=" * 70)
+
+    run_emerging_radar(top_n=top_n, force_refresh=force_refresh)
+    run_committee(max_candidates=candidates, force_refresh=force_refresh)
+
+
 def main():
     parser = argparse.ArgumentParser(description="CAF-Terminal: Automated Radar & CVE Scoring")
+    # Cadence framework
+    parser.add_argument("--daily",      action="store_true", help="[День] Экспресс-сенсор суточных аномалий (0 LLM, быстрый скан)")
+    parser.add_argument("--weekly",     action="store_true", help="[Неделя] Полный еженедельный цикл: Радар Топ-20 + Комитет")
+    parser.add_argument("--audit",      action="store_true", help="[Месяц] Ежемесячный аудит портфеля (пересчёт CVE, разлоки, GitHub)")
+    parser.add_argument("--monthly",    action="store_true", help="Алиас для --audit")
+    parser.add_argument("--rebalance",  action="store_true", help="[Квартал] Квартальная ребалансировка, PnL и фиксация прибыли")
+    parser.add_argument("--quarterly",  action="store_true", help="Алиас для --rebalance")
+
+    # Core components
     parser.add_argument("--radar",      action="store_true", help="Запустить поиск Emerging/Incubator проектов")
     parser.add_argument("--cve",        action="store_true", help="Запустить CVE скоринг ключевых активов")
     parser.add_argument("--committee",  action="store_true", help="Запустить 3-агентный инвестиционный комитет")
@@ -337,11 +361,12 @@ def main():
     parser.add_argument("--target",     type=float, default=None, help="Целевая цена ($)")
     parser.add_argument("--seed",       action="store_true", help="Перезаполнить базу данных из истории беседы")
     parser.add_argument("--refresh",    action="store_true", help="Игнорировать кэш и обновить данные")
-    parser.add_argument("--top",        type=int, default=15, help="Количество проектов в радаре (по умолчанию: 15)")
+    parser.add_argument("--top",        type=int, default=20, help="Количество проектов в радаре (по умолчанию: 20)")
     parser.add_argument("--candidates", type=int, default=5,  help="Сколько сигналов рассматривает комитет (по умолчанию: 5)")
 
     args = parser.parse_args()
 
+    # 1. Maintenance
     if args.seed:
         from src.database.registry import CAFRegistry
         reg = CAFRegistry()
@@ -356,25 +381,43 @@ def main():
         run_set_price(args.symbol, entry=args.entry, current=args.current, target=args.target)
         return
 
-    if args.pnl:
-        run_pnl_view()
+    # 2. Cadence framework execution
+    if args.daily:
+        from src.scouts.daily_sensor import run_daily_sensor
+        run_daily_sensor(force_refresh=args.refresh)
         return
 
-    if args.registry:
+    if args.weekly:
+        run_weekly_cycle(top_n=args.top, candidates=args.candidates, force_refresh=args.refresh)
+        return
+
+    if args.audit or args.monthly:
+        from src.scoring.portfolio_audit import run_monthly_audit
+        run_monthly_audit(force_refresh=args.refresh)
+        return
+
+    if args.rebalance or args.quarterly:
+        from src.scoring.portfolio_audit import run_quarterly_rebalance
+        run_quarterly_rebalance(force_refresh=args.refresh)
+        return
+
+    # 3. Individual views & runs
+    if args.pnl:
+        run_pnl_view()
+    elif args.registry:
         run_registry_view()
     elif args.committee:
         run_committee(max_candidates=args.candidates, force_refresh=args.refresh)
-    elif not args.radar and not args.cve:
-        print("[Info] Запуск полного цикла (Радар + CVE Скоринг)...")
+    elif args.radar:
         run_emerging_radar(top_n=args.top, force_refresh=args.refresh)
+    elif args.cve:
         run_cve_scoring(force_refresh=args.refresh)
     else:
-        if args.radar:
-            run_emerging_radar(top_n=args.top, force_refresh=args.refresh)
-        if args.cve:
-            run_cve_scoring(force_refresh=args.refresh)
+        # Default: Full weekly cycle
+        run_weekly_cycle(top_n=args.top, candidates=args.candidates, force_refresh=args.refresh)
 
 
 if __name__ == "__main__":
     main()
+
 

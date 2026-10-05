@@ -99,15 +99,88 @@ def notify_radar_results(candidates: List[Dict[str, Any]], top_n: int = 5) -> No
     if not candidates:
         return
 
-    lines = ["<b>CAF-Terminal | Emerging Radar</b>\n"]
-    lines.append(f"Топ-{top_n} сигналов этой недели:\n")
+    lines = ["<b>📡 CAF-Terminal | Emerging Radar (Топ-Недели)</b>\n"]
+    lines.append(f"Топ-{top_n} проектов по скорингу и ончейн-динамике:\n")
 
     for i, c in enumerate(candidates[:top_n], 1):
         tvl = f"${c.get('tvl', 0):,.0f}" if c.get("tvl") else "N/A"
+        c7d = c.get('change_7d', 0)
+        c7d_str = f"+{c7d:.1f}%" if c7d > 0 else f"{c7d:.1f}%"
         score = c.get("radar_score", 0)
         lines.append(
             f"{i}. <b>{c.get('symbol', '?')}</b> {c.get('name', '')} "
-            f"— TVL: {tvl} | Score: {score}"
+            f"({c.get('category', 'DeFi')})\n"
+            f"   TVL: {tvl} (7d: {c7d_str}) | Score: <b>{score}</b>"
         )
 
+    lines.append(f"\n<i>Полный отчёт сохранён в reports/</i>")
+    notify("\n".join(lines))
+
+
+def notify_daily_flash(anomalies: List[Dict[str, Any]]) -> None:
+    """Sends immediate alert if daily flash anomalies are detected."""
+    if not anomalies:
+        return
+
+    lines = ["<b>⚡ CAF-Terminal | Дневной сенсор: Обнаружены аномалии!</b>\n"]
+    for a in anomalies[:5]:
+        reason = a.get("reason", "Всплеск метрик")
+        metric = a.get("metric_str", "")
+        lines.append(f"• <b>{a.get('name')}</b> ({a.get('symbol')}) — {reason}: <code>{metric}</code>")
+
+    lines.append("\n<i>Запустите 'python main.py --committee' для вынесения вердикта.</i>")
+    notify("\n".join(lines))
+
+
+def notify_audit_results(audit_summary: Dict[str, Any]) -> None:
+    """Sends monthly portfolio audit results to Telegram."""
+    total = audit_summary.get("total_assets", 0)
+    promotions = audit_summary.get("promotions", [])
+    demotions = audit_summary.get("demotions", [])
+    active_dev = audit_summary.get("active_dev_count", 0)
+
+    lines = ["<b>🔍 CAF-Terminal | Ежемесячный Аудит Портфеля</b>\n"]
+    lines.append(f"• Проверено активов в базе: <b>{total}</b>")
+    lines.append(f"• Активная разработка (GitHub): <b>{active_dev}</b> проектов\n")
+
+    if promotions:
+        lines.append("📈 <b>Повышение статуса / Переход в Core:</b>")
+        for p in promotions:
+            lines.append(f"  • <b>{p['symbol']}</b>: {p['old_tier']} ➔ <b>{p['new_tier']}</b> (Score: {p['score']})")
+
+    if demotions:
+        lines.append("\n📉 <b>Предупреждение / Снижение тира:</b>")
+        for d in demotions:
+            lines.append(f"  • <b>{d['symbol']}</b>: {d['old_tier']} ➔ <b>{d['new_tier']}</b> ({d.get('reason', '')})")
+
+    if not promotions and not demotions:
+        lines.append("✅ <i>Все фундаментальные тезисы подтверждены. Изменений в структуре тиров нет.</i>")
+
+    lines.append("\n<i>Полный аудит сохранён в reports/</i>")
+    notify("\n".join(lines))
+
+
+def notify_rebalance_results(rebalance_summary: Dict[str, Any]) -> None:
+    """Sends quarterly rebalancing recommendations to Telegram."""
+    avg_pnl = rebalance_summary.get("avg_pnl", 0.0)
+    targets_hit = rebalance_summary.get("targets_hit", [])
+    drawdowns = rebalance_summary.get("drawdowns", [])
+
+    lines = ["<b>⚖️ CAF-Terminal | Квартальная Ребалансировка и PnL</b>\n"]
+    sign = "+" if avg_pnl > 0 else ""
+    lines.append(f"• Средняя доходность портфеля: <b>{sign}{avg_pnl:.1f}%</b>\n")
+
+    if targets_hit:
+        lines.append("🎯 <b>Целевая цена достигнута (Take Profit):</b>")
+        for t in targets_hit:
+            lines.append(f"  • <b>{t['symbol']}</b>: PnL <b>+{t['pnl']:.1f}%</b> (Текущая: ${t['current']:.2f} / Цель: ${t['target']:.2f})")
+
+    if drawdowns:
+        lines.append("\n⚠️ <b>Глубокая просадка (Проверить тезис):</b>")
+        for d in drawdowns:
+            lines.append(f"  • <b>{d['symbol']}</b>: PnL <b>{d['pnl']:.1f}%</b>")
+
+    lines.append("\n<b>Рекомендуемое распределение капитала:</b>")
+    lines.append("• Core: <b>55%</b> | High Conviction: <b>30%</b> | Incubator: <b>15%</b>")
+    lines.append("\n<i>Полный отчёт: reports/</i>")
     notify("\n".join(lines))
