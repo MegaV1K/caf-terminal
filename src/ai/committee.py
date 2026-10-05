@@ -13,6 +13,7 @@ Decision flow:
 """
 
 import json
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -261,14 +262,35 @@ class _BaseAgent:
         self.model = _make_model()
 
     def _call(self, user_message: str) -> str:
-        if not self.model:
+        if not GEMINI_API_KEY:
             return f"[{self.ROLE}] API key not configured."
-        try:
-            full_prompt = f"{self.SYSTEM_PROMPT}\n\n{user_message}"
-            response = self.model.generate_content(full_prompt)
-            return response.text.strip()
-        except Exception as e:
-            return f"[{self.ROLE}] Error: {e}"
+
+        models_to_try = [
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-flash-latest",
+        ]
+        # Remove duplicates while preserving order
+        unique_models = list(dict.fromkeys(models_to_try))
+
+        full_prompt = f"{self.SYSTEM_PROMPT}\n\n{user_message}"
+        last_error = None
+
+        for model_name in unique_models:
+            try:
+                time.sleep(1.5)  # Avoid bursting free-tier RPM limits
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(full_prompt)
+                return response.text.strip()
+            except Exception as e:
+                err_str = str(e)
+                last_error = err_str
+                if "429" in err_str or "quota" in err_str.lower() or "404" in err_str:
+                    continue
+                else:
+                    return f"[{self.ROLE}] Error: {err_str}"
+
+        return f"[{self.ROLE}] Error (quota exceeded on all models): {last_error}"
 
     @staticmethod
     def _format_signal(s: Signal) -> str:

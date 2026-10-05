@@ -20,7 +20,7 @@ except ImportError:
 
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 # DefiLlama Endpoints (Free, no API key required)
