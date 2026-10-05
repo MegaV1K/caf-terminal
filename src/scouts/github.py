@@ -37,7 +37,6 @@ class GitHubScout:
         "SNX":    "Synthetixio/synthetix",
         "KMNO":   "Kamino-Finance/kamino-lending",
         "TRAC":   "OriginTrail/ot-node",
-        "DEEP":   "MystenLabs/deepbook-v3",
         "FLUID":  "Instadapp/fluid-contracts",
         "AAVE":   "aave/aave-v3-core",
         "UNI":    "Uniswap/v3-core",
@@ -45,7 +44,7 @@ class GitHubScout:
         "MKR":    "makerdao/dss",
         "COMP":   "compound-finance/compound-protocol",
         "GMX":    "gmx-io/gmx-contracts",
-        "JUP":    "jup-ag/jupiter-core",
+        "JUP":    "jup-ag/jupiter-terminal",
         "JTO":    "jito-foundation/jito-programs",
         "WIF":    "solana-labs/solana",     # on Solana network
         "PENDLE": "pendle-finance/pendle-core-v2",
