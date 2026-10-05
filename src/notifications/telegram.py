@@ -184,3 +184,48 @@ def notify_rebalance_results(rebalance_summary: Dict[str, Any]) -> None:
     lines.append("• Core: <b>55%</b> | High Conviction: <b>30%</b> | Incubator: <b>15%</b>")
     lines.append("\n<i>Полный отчёт: reports/</i>")
     notify("\n".join(lines))
+
+
+def notify_portfolio_registry(active_portfolio: List[Dict[str, Any]], watchlist_count: int) -> None:
+    """Sends current active portfolio card to Telegram."""
+    lines = ["<b>💼 CAF-Terminal | Активный Портфель (≤20 активов)</b>\n"]
+
+    core = [a for a in active_portfolio if a['tier'] in ('Core', 'Core Candidate')]
+    high_conv = [a for a in active_portfolio if a['tier'] == 'High Conviction']
+    incubator = [a for a in active_portfolio if a['tier'] in ('Invest', 'Incubator')]
+
+    if core:
+        lines.append("🟢 <b>Core (Цель: 55% капитала):</b>")
+        for a in core:
+            lines.append(f"  • <b>{a['symbol']}</b> ({a['name']}) — Score: <b>{a['score']:.1f}</b> (~9.1%)")
+
+    if high_conv:
+        lines.append("\n🔵 <b>High Conviction (Цель: 30% капитала):</b>")
+        for a in high_conv:
+            lines.append(f"  • <b>{a['symbol']}</b> ({a['name']}) — Score: <b>{a['score']:.1f}</b> (~3.75%)")
+
+    if incubator:
+        lines.append("\n🟡 <b>Incubator (Цель: 15% капитала):</b>")
+        for a in incubator:
+            lines.append(f"  • <b>{a['symbol']}</b> ({a['name']}) — Score: <b>{a['score']:.1f}</b> (~2.5%)")
+
+    lines.append(f"\n• Всего в активном портфеле: <b>{len(active_portfolio)} / 20</b>")
+    lines.append(f"• На скамье наблюдения (Watchlist): <b>{watchlist_count}</b> проектов")
+    lines.append("\n<i>Полный реестр: reports/caf_portfolio_registry.md</i>")
+    notify("\n".join(lines))
+
+
+def notify_pnl_summary(pnl_data: List[Dict[str, Any]]) -> None:
+    """Sends PnL performance table to Telegram."""
+    if not pnl_data:
+        return
+    lines = ["<b>📊 CAF-Terminal | Доходность Портфеля (PnL)</b>\n"]
+    for p in pnl_data:
+        pnl = p.get('pnl_pct')
+        sign = "+" if pnl and pnl > 0 else ""
+        pnl_str = f"{sign}{pnl:.1f}%" if pnl is not None else "—"
+        cur_str = f"${p['current_price']:.3f}" if p.get('current_price') else "—"
+        e_str = f"${p['entry_price']:.3f}" if p.get('entry_price') else "—"
+        lines.append(f"• <b>{p['symbol']}</b> ({p['tier']}): <b>{pnl_str}</b> (Вход: {e_str} / Текущая: {cur_str})")
+    notify("\n".join(lines))
+

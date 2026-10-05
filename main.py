@@ -291,6 +291,14 @@ def run_registry_view():
     print(f"[OK] Полный реестр экспортирован в: {report_file}")
     print("=" * 85)
 
+    # Optional Telegram Alert
+    try:
+        from src.notifications.telegram import notify_portfolio_registry
+        notify_portfolio_registry(active_portfolio, watchlist_count)
+        print("[Telegram] Сводка портфеля отправлена в Telegram.")
+    except Exception:
+        pass
+
 
 def run_pnl_view():
     """Displays portfolio PnL performance table."""
@@ -320,6 +328,14 @@ def run_pnl_view():
         pnl_str = f"{pnl:+.1f}%" if pnl is not None else "—"
         print(f"{a['symbol']:<8} {a['name'][:16]:<18} {a['tier']:<16} {e_str:<10} {c_str:<10} {t_str:<10} {pnl_str:<10}")
     print("=" * 80)
+
+    # Optional Telegram Alert
+    try:
+        from src.notifications.telegram import notify_pnl_summary
+        notify_pnl_summary(summary)
+        print("[Telegram] PnL сводка отправлена в Telegram.")
+    except Exception:
+        pass
 
 
 def run_set_price(symbol: str, entry: float = None, current: float = None, target: float = None):
