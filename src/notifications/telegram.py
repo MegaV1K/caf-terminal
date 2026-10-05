@@ -52,7 +52,7 @@ def notify(message: str, parse_mode: str = "HTML") -> bool:
 def notify_committee_results(reports: List[Any]) -> None:
     """
     Sends a formatted Telegram summary of Investment Committee verdicts.
-    Only sends if at least one FULL_CAF or INCUBATOR verdict was found.
+    Always notifies the user about committee deliberations.
     """
     if not reports:
         return
@@ -61,14 +61,10 @@ def notify_committee_results(reports: List[Any]) -> None:
     incubators = [r for r in reports if r.verdict.value == "INCUBATOR"]
     passes     = [r for r in reports if r.verdict.value == "PASS"]
 
-    # Only notify if there's something actionable
-    if not full_cafs and not incubators:
-        return
-
-    lines = ["<b>CAF-Terminal | Investment Committee Results</b>\n"]
+    lines = ["<b>🏛️ CAF-Terminal | Заседание Инвестиционного Комитета</b>\n"]
 
     if full_cafs:
-        lines.append("🔴 <b>FULL CAF — Срочный анализ:</b>")
+        lines.append("🔴 <b>FULL CAF — Срочный глубокий анализ:</b>")
         for r in full_cafs:
             lines.append(
                 f"  • <b>{r.signal.symbol}</b> ({r.signal.name}) "
@@ -76,17 +72,22 @@ def notify_committee_results(reports: List[Any]) -> None:
             )
 
     if incubators:
-        lines.append("\n📋 <b>INCUBATOR — Добавить в наблюдение:</b>")
+        lines.append("\n📋 <b>INCUBATOR — Добавить в портфель наблюдения:</b>")
         for r in incubators:
             lines.append(
                 f"  • <b>{r.signal.symbol}</b> ({r.signal.name}) "
                 f"— {r.signal.signal_type} | Уверенность: {r.conviction_score:.0f}%"
             )
 
-    if passes:
-        lines.append(f"\n⚪ Пропущено: {', '.join(r.signal.symbol for r in passes)}")
+    if passes and not full_cafs and not incubators:
+        lines.append("⚪ <b>Все кандидаты отклонены (PASS):</b>")
+        for r in passes:
+            lines.append(f"  • <b>{r.signal.name}</b> ({r.signal.symbol}) — риски превышают потенциал")
+        lines.append("\n<i>💡 Качественных точек входа в этом цикле не найдено. Капитал защищён от сомнительных токенов.</i>")
+    elif passes:
+        lines.append(f"\n⚪ <b>Отклонено:</b> {', '.join(r.signal.symbol for r in passes)}")
 
-    lines.append(f"\n<i>Всего сигналов: {len(reports)}</i>")
+    lines.append(f"\n<i>Всего рассмотрено сигналов: {len(reports)}</i>")
     message = "\n".join(lines)
     sent = notify(message)
     if sent:
