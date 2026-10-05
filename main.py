@@ -249,34 +249,47 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
 
 
 def run_registry_view():
-    """Displays and exports the CAF/CVE Portfolio & Incubator Registry."""
+    """Displays and exports the CAF/CVE Portfolio (strictly max 20 assets) & Watchlist."""
     from src.database.registry import CAFRegistry
     reg = CAFRegistry()
-    assets = reg.get_all_assets()
-    if not assets:
+    active_portfolio = reg.get_active_portfolio()
+    if not active_portfolio:
         print("[Info] База данных пуста. Запуск наполнения из базового анализа...")
-        count = reg.seed_from_conversation()
-        print(f"[+] Добавлено {count} проектов в базу.")
-        assets = reg.get_all_assets()
+        reg.seed_from_conversation()
+        active_portfolio = reg.get_active_portfolio()
 
+    all_assets = reg.get_all_assets()
+    watchlist_count = len(all_assets) - len(active_portfolio)
     report_file = reg.generate_registry_markdown()
 
-    print("\n" + "=" * 80)
-    print("📋 РЕЕСТР ПОРТФЕЛЯ И ИНКУБАТОРА CAF / CVE (БАЗА ДАННЫХ)")
-    print("=" * 80)
-    print(f"{'Тикер':<8} {'Проект':<22} {'Уровень':<18} {'Score':<6} {'Сектор':<20}")
-    print("-" * 80)
+    print("\n" + "=" * 85)
+    print("💼 АКТИВНЫЙ ИНВЕСТИЦИОННЫЙ ПОРТФЕЛЬ CAF / CVE (СТРОГО МАКСИМУМ 20 АКТИВОВ)")
+    print("=" * 85)
+    print("Правило Дарвина: новые победители вытесняют слабейшие активы в Watchlist.")
+    print("-" * 85)
+    print(f"{'Тикер':<8} {'Проект':<20} {'Уровень':<16} {'Доля пула':<12} {'Score':<6} {'Сектор'}")
+    print("-" * 85)
 
-    for a in assets:
+    tier_allocations = {
+        "Core": "~9.1% (55%)",
+        "Core Candidate": "~9.1% (55%)",
+        "High Conviction": "~3.75% (30%)",
+        "Invest": "~2.5% (15%)",
+        "Incubator": "~2.5% (15%)",
+    }
+
+    for a in active_portfolio:
         score_str = f"{a['score']:.1f}" if a['score'] else "—"
-        name_short = (a['name'][:20] + "..") if len(a['name']) > 20 else a['name']
+        name_short = (a['name'][:18] + "..") if len(a['name']) > 18 else a['name']
+        alloc = tier_allocations.get(a['tier'], "—")
         sec_short = (a['sector'][:18] + "..") if a['sector'] and len(a['sector']) > 18 else (a['sector'] or "—")
-        print(f"{a['symbol']:<8} {name_short:<22} {a['tier']:<18} {score_str:<6} {sec_short:<20}")
+        print(f"{a['symbol']:<8} {name_short:<20} {a['tier']:<16} {alloc:<12} {score_str:<6} {sec_short}")
 
-    print("\n" + "=" * 80)
-    print(f"Всего активов в базе: {len(assets)}")
+    print("\n" + "=" * 85)
+    print(f"• Активов в активном портфеле: {len(active_portfolio)} / 20 (100% лимит)")
+    print(f"• На скамье наблюдения (Watchlist): {watchlist_count} проектов")
     print(f"[OK] Полный реестр экспортирован в: {report_file}")
-    print("=" * 80)
+    print("=" * 85)
 
 
 def run_pnl_view():

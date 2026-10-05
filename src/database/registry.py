@@ -246,6 +246,98 @@ class CAFRegistry:
             ))
             conn.commit()
 
+    MAX_CORE_ASSETS = 6          # Core (55% капитала, ~9.1% на актив)
+    MAX_HIGH_CONV_ASSETS = 8     # High Conviction (30% капитала, ~3.75% на актив)
+    MAX_INCUBATOR_ASSETS = 6     # Incubator (15% капитала, ~2.5% на актив)
+    MAX_ACTIVE_PORTFOLIO = 20    # СТРОГО максимум 20 активов в активном портфеле
+
+    def enforce_portfolio_limit(self) -> Dict[str, Any]:
+        """
+        Enforces Darwinian selection rule:
+        - Portfolio CANNOT have more than 20 assets.
+        - Core tier: top 6 assets (highest score) -> status='Portfolio'
+        - High Conviction tier: top 8 assets -> status='Portfolio'
+        - Incubator tier: top 6 assets -> status='Portfolio'
+        - All other assets and excess projects get status='Watchlist'.
+        """
+        displaced = []
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+
+            # 1. Core candidates
+            cur.execute("""
+                SELECT symbol, name, score FROM assets 
+                WHERE tier IN ('Core', 'Core Candidate')
+                ORDER BY score DESC, symbol ASC
+            """)
+            cores = cur.fetchall()
+            for idx, row in enumerate(cores):
+                new_status = 'Portfolio' if idx < self.MAX_CORE_ASSETS else 'Watchlist'
+                if idx >= self.MAX_CORE_ASSETS:
+                    displaced.append({"symbol": row["symbol"], "tier": "Core", "displaced_to": "Watchlist"})
+                cur.execute("UPDATE assets SET status = ? WHERE symbol = ?", (new_status, row["symbol"]))
+
+            # 2. High Conviction candidates
+            cur.execute("""
+                SELECT symbol, name, score FROM assets 
+                WHERE tier = 'High Conviction'
+                ORDER BY score DESC, symbol ASC
+            """)
+            high_conv = cur.fetchall()
+            for idx, row in enumerate(high_conv):
+                new_status = 'Portfolio' if idx < self.MAX_HIGH_CONV_ASSETS else 'Watchlist'
+                if idx >= self.MAX_HIGH_CONV_ASSETS:
+                    displaced.append({"symbol": row["symbol"], "tier": "High Conviction", "displaced_to": "Watchlist"})
+                cur.execute("UPDATE assets SET status = ? WHERE symbol = ?", (new_status, row["symbol"]))
+
+            # 3. Incubator candidates (Invest / Incubator)
+            cur.execute("""
+                SELECT symbol, name, score FROM assets 
+                WHERE tier IN ('Incubator', 'Invest')
+                ORDER BY score DESC, symbol ASC
+            """)
+            incubators = cur.fetchall()
+            for idx, row in enumerate(incubators):
+                new_status = 'Portfolio' if idx < self.MAX_INCUBATOR_ASSETS else 'Watchlist'
+                if idx >= self.MAX_INCUBATOR_ASSETS:
+                    displaced.append({"symbol": row["symbol"], "tier": "Incubator", "displaced_to": "Watchlist"})
+                cur.execute("UPDATE assets SET status = ? WHERE symbol = ?", (new_status, row["symbol"]))
+
+            # 4. Watch tier is always Watchlist
+            cur.execute("UPDATE assets SET status = 'Watchlist' WHERE tier = 'Watch'")
+
+            conn.commit()
+
+        return {"displaced": displaced}
+
+    def get_active_portfolio(self) -> List[Dict[str, Any]]:
+        """
+        Returns ONLY the active portfolio assets (strictly maximum 20 assets):
+        - Core (max 6, target 55% allocation)
+        - High Conviction (max 8, target 30% allocation)
+        - Incubator (max 6, target 15% allocation)
+        """
+        self.enforce_portfolio_limit()
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT * FROM assets 
+                WHERE status = 'Portfolio'
+                ORDER BY 
+                    CASE tier 
+                        WHEN 'Core' THEN 1 
+                        WHEN 'Core Candidate' THEN 2 
+                        WHEN 'High Conviction' THEN 3 
+                        WHEN 'Invest' THEN 4 
+                        WHEN 'Incubator' THEN 5 
+                        ELSE 6 
+                    END, 
+                    score DESC, 
+                    symbol ASC
+                LIMIT 20
+            """)
+            return [dict(row) for row in cur.fetchall()]
+
     def get_all_assets(self, tier: Optional[str] = None) -> List[Dict[str, Any]]:
         """Returns all assets ordered by tier priority."""
         with self._get_conn() as conn:
@@ -347,34 +439,65 @@ class CAFRegistry:
         report_path = REPORTS_DIR / "caf_portfolio_registry.md"
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        assets = self.get_all_assets()
+        active_portfolio = self.get_active_portfolio()
+        all_assets = self.get_all_assets()
+        watchlist = [a for a in all_assets if a["status"] != "Portfolio"]
         decisions = self.get_decisions(limit=10)
 
         lines = [
             "# CAF / CVE Portfolio & Incubator Registry",
             f"**Дата актуализации:** {now_str}  ",
-            f"**Всего активов в базе:** {len(assets)}  ",
+            f"**Активов в активном портфеле:** {len(active_portfolio)} / {self.MAX_ACTIVE_PORTFOLIO} (Лимит: 20)  ",
+            f"**Активов в списке наблюдения (Watchlist):** {len(watchlist)}  ",
             "",
-            "## 🏆 Распределение по тирам методологии CVE",
+            "## 💼 1. Активный инвестиционный портфель (Лимит: 20 активов)",
+            "Правило Дарвина: при входе нового проекта с высоким баллом худший проект вытесняется в Watchlist.",
             "",
-            "| Тикер | Проект | Сектор | Уровень CVE | Score | Тезис / Обоснование | Статус |",
+            "| Тикер | Проект | Сектор | Уровень | Целевая доля | Score | Тезис / Обоснование |",
             "|---|---|---|---|---|---|---|",
         ]
 
         tier_badges = {
             "Core": "🟢 **CORE**",
-            "Core Candidate": "🟢 **CORE CANDIDATE**",
+            "Core Candidate": "🟢 **CORE**",
             "High Conviction": "🔵 **HIGH CONVICTION**",
-            "Invest": "🟡 **INVEST**",
+            "Invest": "🟡 **INCUBATOR**",
+            "Incubator": "🟡 **INCUBATOR**",
             "Watch": "⚪ **WATCH**",
         }
 
-        for a in assets:
+        tier_allocations = {
+            "Core": "~9.1% (55% пул)",
+            "Core Candidate": "~9.1% (55% пул)",
+            "High Conviction": "~3.75% (30% пул)",
+            "Invest": "~2.5% (15% пул)",
+            "Incubator": "~2.5% (15% пул)",
+        }
+
+        for a in active_portfolio:
             badge = tier_badges.get(a["tier"], a["tier"])
+            alloc = tier_allocations.get(a["tier"], "—")
             score_str = f"**{a['score']:.1f}**" if a["score"] else "—"
-            thesis_short = (a["thesis"][:90] + "...") if a["thesis"] and len(a["thesis"]) > 90 else (a["thesis"] or "—")
+            thesis_short = (a["thesis"][:80] + "...") if a["thesis"] and len(a["thesis"]) > 80 else (a["thesis"] or "—")
             lines.append(
-                f"| `{a['symbol']}` | **{a['name']}** | {a['sector']} | {badge} | {score_str} | {thesis_short} | `{a['status']}` |"
+                f"| `{a['symbol']}` | **{a['name']}** | {a['sector']} | {badge} | **{alloc}** | {score_str} | {thesis_short} |"
+            )
+
+        lines += [
+            "",
+            "---",
+            f"## 📋 2. Резервная скамья и наблюдение (Watchlist — {len(watchlist)} активов)",
+            "",
+            "| Тикер | Проект | Сектор | Уровень CVE | Score | Причина нахождения в резерве |",
+            "|---|---|---|---|---|---|",
+        ]
+
+        for a in watchlist:
+            badge = tier_badges.get(a["tier"], a["tier"])
+            score_str = f"{a['score']:.1f}" if a["score"] else "—"
+            reason = (a["counter_thesis"][:80] + "...") if a.get("counter_thesis") else (a["thesis"][:80] if a.get("thesis") else "Наблюдение")
+            lines.append(
+                f"| `{a['symbol']}` | {a['name']} | {a['sector']} | {badge} | {score_str} | {reason} |"
             )
 
         if decisions:
