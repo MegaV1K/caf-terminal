@@ -1,0 +1,319 @@
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from config import DATA_DIR, REPORTS_DIR
+
+
+DB_PATH = DATA_DIR / "caf_registry.db"
+
+
+class CAFRegistry:
+    """
+    Persistent SQLite Registry for CAF/CVE Asset Portfolio,
+    Incubator Watchlist, and Committee Deliberation History.
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        self._init_db()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            # 1. Assets / Portfolio Registry table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS assets (
+                    symbol TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    sector TEXT,
+                    tier TEXT NOT NULL,
+                    thesis TEXT,
+                    counter_thesis TEXT,
+                    score REAL,
+                    status TEXT DEFAULT 'Active',
+                    last_reviewed TEXT,
+                    updated_at TEXT
+                )
+            """)
+
+            # 2. Committee Decisions History table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS committee_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    sector TEXT,
+                    signal_type TEXT NOT NULL,
+                    signal_strength REAL,
+                    verdict TEXT NOT NULL,
+                    conviction_score REAL,
+                    analyst_thesis TEXT,
+                    skeptic_critique TEXT,
+                    cfo_reasoning TEXT,
+                    follow_up_actions TEXT
+                )
+            """)
+            conn.commit()
+
+    def upsert_asset(
+        self,
+        symbol: str,
+        name: str,
+        tier: str,
+        sector: str = "",
+        thesis: str = "",
+        counter_thesis: str = "",
+        score: Optional[float] = None,
+        status: str = "Active",
+    ) -> None:
+        """Adds or updates an asset in the registry."""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO assets (symbol, name, sector, tier, thesis, counter_thesis, score, status, last_reviewed, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    name = excluded.name,
+                    sector = CASE WHEN excluded.sector != '' THEN excluded.sector ELSE assets.sector END,
+                    tier = excluded.tier,
+                    thesis = CASE WHEN excluded.thesis != '' THEN excluded.thesis ELSE assets.thesis END,
+                    counter_thesis = CASE WHEN excluded.counter_thesis != '' THEN excluded.counter_thesis ELSE assets.counter_thesis END,
+                    score = COALESCE(excluded.score, assets.score),
+                    status = excluded.status,
+                    last_reviewed = excluded.last_reviewed,
+                    updated_at = excluded.updated_at
+            """, (symbol.upper(), name, sector, tier, thesis, counter_thesis, score, status, now_str, now_str))
+            conn.commit()
+
+    def record_committee_decision(self, report: Any) -> None:
+        """Records deliberation from Investment Committee report into database."""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        s = report.signal
+        actions_str = json.dumps(report.follow_up_actions, ensure_ascii=False)
+
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO committee_decisions (
+                    created_at, symbol, name, sector, signal_type, signal_strength,
+                    verdict, conviction_score, analyst_thesis, skeptic_critique,
+                    cfo_reasoning, follow_up_actions
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                now_str,
+                s.symbol.upper(),
+                s.name,
+                s.category,
+                s.signal_type,
+                s.signal_strength,
+                report.verdict.value,
+                report.conviction_score,
+                report.analyst_thesis,
+                report.skeptic_critique,
+                report.cfo_reasoning,
+                actions_str,
+            ))
+
+            # If verdict is FULL_CAF or INCUBATOR, also update assets table
+            tier_map = {
+                "FULL_CAF": "Core Candidate",
+                "INCUBATOR": "High Conviction",
+                "PASS": "Watch",
+            }
+            mapped_tier = tier_map.get(report.verdict.value, "Watch")
+            status_map = {
+                "FULL_CAF": "Deep Review",
+                "INCUBATOR": "Incubator",
+                "PASS": "Archived",
+            }
+
+            cur.execute("""
+                INSERT INTO assets (symbol, name, sector, tier, thesis, counter_thesis, score, status, last_reviewed, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    tier = excluded.tier,
+                    thesis = excluded.thesis,
+                    status = excluded.status,
+                    last_reviewed = excluded.last_reviewed,
+                    updated_at = excluded.updated_at
+            """, (
+                s.symbol.upper(),
+                s.name,
+                s.category,
+                mapped_tier,
+                report.analyst_thesis[:300],
+                report.skeptic_critique[:300],
+                report.conviction_score,
+                status_map.get(report.verdict.value, "Active"),
+                now_str,
+                now_str,
+            ))
+            conn.commit()
+
+    def get_all_assets(self, tier: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns all assets ordered by tier priority."""
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            if tier:
+                cur.execute("SELECT * FROM assets WHERE tier = ? ORDER BY score DESC, symbol ASC", (tier,))
+            else:
+                cur.execute("SELECT * FROM assets ORDER BY CASE tier WHEN 'Core' THEN 1 WHEN 'Core Candidate' THEN 2 WHEN 'High Conviction' THEN 3 WHEN 'Invest' THEN 4 ELSE 5 END, score DESC, symbol ASC")
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_decisions(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Returns latest committee decisions."""
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM committee_decisions ORDER BY id DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cur.fetchall()]
+
+    def seed_from_conversation(self) -> int:
+        """
+        Seeds registry with all coins evaluated during the initial CAF/CVE analysis.
+        """
+        initial_projects = [
+            # Candidates for Core / High Conviction
+            ("TRAC", "OriginTrail", "Decentralized Knowledge Graph / AI", "Core Candidate", "Проверяемые данные и децентрализованный граф знаний для AI и корпораций", "Конкуренция со стороны централизованных графов знаний", 88.0),
+            ("GEOD", "GEODNET", "DePIN / RTK Positioning", "Core Candidate", "DePIN для высокоточного позиционирования с подтвержденным коммерческим спросом, buyback & burn", "Зависимость от темпа физического развертывания базовых станций", 87.0),
+            ("CFG", "Centrifuge", "RWA Infrastructure", "Core Candidate", "Базовый протокол для токенизации реальных активов и связки TradFi с DeFi", "Регуляторные риски и скорость внедрения институционалами", 86.0),
+            ("SUI", "Sui", "Layer 1", "Core Candidate", "Высокопроизводительный L1 нового поколения на Move с сильной пропускной способностью", "Навес разлоков и жесткая конкуренция среди L1", 85.0),
+            ("FLUID", "Fluid (Instadapp)", "DeFi Liquidity Layer", "Core Candidate", "Единый агрегированный слой ликвидности и кредитования DeFi с высокой капиталоэффективностью", "Конкуренция с монополистами lending-рынка (Aave, Morpho)", 85.0),
+            ("MET", "Meteora", "Solana DEX Infra / DLMM", "Core Candidate", "Ликвидная инфраструктура Solana через динамические пулы DLMM", "Зависимость от экосистемы Solana и конкуренция с Raydium", 84.0),
+            ("DEEP", "DeepBook Protocol", "CLOB DEX Infra", "Core Candidate", "Центральная книга ордеров Sui, глубокая интеграция в ядро сети, buyback & burn", "Прямая зависимость от активности на Sui", 84.0),
+            ("SNX", "Synthetix", "Derivatives Infra", "Core Candidate", "Синтетические активы, v3 perpetuals и слой ликвидности деривативов", "Сложность модели и риск смарт-контрактов", 83.0),
+            ("AR", "Arweave", "Decentralized Storage / AO", "Core Candidate", "Постоянное децентрализованное хранение данных и вычислительная среда AO", "Необходимость устойчивого коммерческого спроса", 83.0),
+            ("AKT", "Akash Network", "DePIN / Cloud Compute", "High Conviction", "Децентрализованный маркетплейс вычислений и GPU для AI", "Конкуренция с централизованными облаками и Web2 агрегаторами", 81.0),
+            ("RUNE", "THORChain", "Cross-chain Liquidity", "High Conviction", "Кроссчейн-обмен нативными активами без обёрток, прямой захват ценности через пул", "Исторические риски безопасности кроссчейн-маршрутизации", 80.0),
+            ("RAY", "Raydium", "Solana DEX", "High Conviction", "Ключевой DEX Solana, агрегатор ликвидности мем-токенов и DLMM", "Высокая зависимость от мем-цикла Solana", 79.0),
+            ("EIGEN", "EigenLayer", "Restaking", "High Conviction", "Базовый уровень коллективной криптоэкономической безопасности Ethereum через restaking", "Молодой рынок restaking, AVS еще не генерируют массовый денежный поток", 79.0),
+            ("STRK", "Starknet", "Layer 2 ZK", "High Conviction", "Один из ключевых ZK L2 для Ethereum, уникальная виртуальная машина Cairo", "Высокая конкуренция среди L2, связь активности с ценностью токена еще доказывается", 78.0),
+            ("GRT", "The Graph", "Web3 Indexing", "High Conviction", "Стандарт индексации данных блокчейнов для dApps", "Не до конца доказанная прямая связь роста запросов с ценностью токена", 78.0),
+            ("ZAMA", "Zama", "FHE / Privacy", "High Conviction", "Инфраструктура конфиденциальных вычислений на полностью гомоморфном шифровании (FHE)", "Ранняя стадия технологии, тяжелые вычисления", 77.0),
+            ("1INCH", "1inch", "DEX Aggregator", "High Conviction", "Ведущий DEX-агрегатор ликвидности и маршрутизации ордеров", "Слабый прямой захват ценности токеном (governance-heavy)", 76.0),
+            ("KMNO", "Kamino Finance", "Solana DeFi", "High Conviction", "Ведущий протокол кредитования, автоматических хранилищ и левереджа на Solana", "Конкуренция внутри Solana, умеренный захват ценности", 76.0),
+            ("GLM", "Golem", "Compute", "High Conviction", "Децентрализованный рынок вычислительных мощностей", "Необходимость подтверждения устойчивого спроса", 75.0),
+            ("METIS", "Metis", "Layer 2", "High Conviction", "Ethereum L2 с децентрализованным секвенсором и AI-направлением", "Конкуренция с Arbitrum, Optimism, Base", 74.0),
+            ("NEX", "Nexus", "Verifiable Compute", "High Conviction", "Инфраструктура для верифицируемых вычислений и ZK", "Ранняя стадия, навес будущих анлоков", 74.0),
+            ("GRASS", "Grass", "DePIN / AI Data", "High Conviction", "Децентрализованная сеть веб-скрейпинга и данных для обучения AI моделей", "Юридические и операционные риски сбора веб-данных", 74.0),
+            ("BEAM", "Beam", "Web3 Gaming Infra", "High Conviction", "Игровая экосистема и сеть на Avalanche для Web3 тайтлов", "Зависимость от успеха отдельных игровых студий", 73.0),
+            ("NXPC", "NEXPACE", "Web3 Gaming / MapleStory", "High Conviction", "Web3-экономика на базе IP Nexon и MapleStory Universe", "Цикличность GameFi и удержание игроков", 73.0),
+            ("H", "Humanity Protocol", "Identity / PoH", "High Conviction", "Инфраструктура цифровой идентичности с сохранением приватности", "Массовое внедрение еще предстоит доказать", 72.0),
+
+            # Invest Tier
+            ("TWT", "Trust Wallet Token", "Wallet Utility", "Invest", "Ключевой utility-токен популярного кошелька Trust Wallet", "Продукт успешен, но связь роста кошелька с токеном ограничена", 66.0),
+            ("TEL", "Telcoin", "Mobile Payments", "Invest", "Инфраструктура для мобильных денежных переводов через сотовых операторов", "Зависимость от регулирования и конкуренция со стейблкоинами", 64.0),
+            ("COMP", "Compound", "Lending", "Invest", "Проверенный временем протокол кредитования DeFi", "Слабая связь роста TVL с капитализацией токена управления", 63.0),
+            ("IOTA", "IOTA", "IoT / RWA", "Invest", "Инфраструктура для интернета вещей и токенизации активов", "Долгий путь к массовому коммерческому принятию", 62.0),
+            ("AXS", "Axie Infinity", "Gaming", "Invest", "Крупнейшая историческая Web3-игровая экосистема", "Цикличность Play-to-Earn и инфляция внутриигровой экономики", 60.0),
+            ("APE", "ApeCoin", "NFT / Metaverse", "Invest", "Токен экосистемы Yuga Labs и метаверс-проектов", "Зависимость от хайпа NFT и отсутствие гарантированного денежного потока", 59.0),
+            ("CHZ", "Chiliz", "Fan Tokens", "Invest", "Спортивная инфраструктура и фан-токены клубов", "Рынок фан-токенов узкий и спекулятивный", 58.0),
+            ("MANA", "Decentraland", "Metaverse", "Invest", "Децентрализованный виртуальный мир", "Ограниченное удержание ежедневных пользователей", 56.0),
+            ("SAND", "The Sandbox", "Metaverse", "Invest", "Метавселенная пользовательского контента", "Низкая активность вне маркетинговых сезонов", 56.0),
+            ("NEO", "NEO", "Layer 1", "Invest", "Платформа смарт-контрактов китайской экосистемы, двухтокеновая модель", "Слабый глобальный сетевой эффект разработчиков", 57.0),
+            ("SFP", "SafePal", "Hardware Wallet", "Invest", "Экосистема аппаратных и программных кошельков", "Токен не захватывает выручку от продажи физических кошельков", 62.0),
+            ("BAT", "Basic Attention Token", "AdTech", "Invest", "Токен внимания внутри браузера Brave", "Рост браузера слабо транслируется в рост цены BAT", 61.0),
+            ("GALA", "Gala Games", "Gaming", "Invest", "Игровая Web3 платформа и распределенная сеть нод", "Зависимость от выпуска хитовых игр и гиперинфляция наград", 58.0),
+            ("EGLD", "MultiversX", "Layer 1", "Invest", "Высокоскоростной шардированный блокчейн", "Слабый сетевой эффект экосистемы разработчиков", 60.0),
+            ("RSR", "Reserve Rights", "Stablecoin Infra", "Invest", "Протокол выпуска децентрализованных индексных стейблкоинов", "Сверхжесткая конкуренция с централизованными стейблкоинами", 61.0),
+            ("ZEN", "Horizen", "ZK Sidechains", "Invest", "Масштабируемые блокчейн-приложения через ZK-сайдчейны", "Высокая конкуренция с новыми L2", 60.0),
+
+            # Watch Tier
+            ("WIF", "dogwifhat", "Meme", "Watch", "Мем-токен на Solana", "Полное отсутствие фундаментальной утилиты и ценности", 35.0),
+            ("CHEEMS", "Cheems", "Meme", "Watch", "Мем-токен", "Спекулятивный хайп без ценности", 30.0),
+            ("YZY", "Yeezy Money", "Celebrity / Brand", "Watch", "Платежный бренд-токен", "Экстремальная концентрация и репутационные риски", 25.0),
+            ("Melania", "Melania", "Celebrity Meme", "Watch", "Медийный хайп", "Отсутствие продукта и экономической функции", 20.0),
+            ("BANANAS31", "Banana for Scale", "Meme", "Watch", "Мем-токен", "Чистая спекуляция", 20.0),
+            ("DATA", "Streamr DATA", "Data Monetization", "Watch", "Децентрализованный брокер данных", "Отсутствие массового коммерческого спроса", 42.0),
+            ("ATH", "Aethir", "Compute / GPU", "Watch", "Рынок GPU для игр и AI", "Сомнительная экономическая устойчивость наград", 45.0),
+            ("ORDI", "ORDI", "BRC-20", "Watch", "Первый токен стандарта BRC-20 на Bitcoin", "Спекулятивный нарратив без утилиты", 40.0),
+            ("UNFI", "Unifi Protocol", "DeFi", "Watch", "Мультичейн DeFi протокол", "Слабая ликвидность и низкая активность", 38.0),
+        ]
+
+        count = 0
+        for symbol, name, sector, tier, thesis, cthesis, score in initial_projects:
+            self.upsert_asset(
+                symbol=symbol,
+                name=name,
+                sector=sector,
+                tier=tier,
+                thesis=thesis,
+                counter_thesis=cthesis,
+                score=score,
+                status="Active" if tier != "Watch" else "Watchlist",
+            )
+            count += 1
+
+        return count
+
+    def generate_registry_markdown(self) -> Path:
+        """Exports the entire portfolio registry into clean GitHub-flavored Markdown."""
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = REPORTS_DIR / "caf_portfolio_registry.md"
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        assets = self.get_all_assets()
+        decisions = self.get_decisions(limit=10)
+
+        lines = [
+            "# CAF / CVE Portfolio & Incubator Registry",
+            f"**Дата актуализации:** {now_str}  ",
+            f"**Всего активов в базе:** {len(assets)}  ",
+            "",
+            "## 🏆 Распределение по тирам методологии CVE",
+            "",
+            "| Тикер | Проект | Сектор | Уровень CVE | Score | Тезис / Обоснование | Статус |",
+            "|---|---|---|---|---|---|---|",
+        ]
+
+        tier_badges = {
+            "Core": "🟢 **CORE**",
+            "Core Candidate": "🟢 **CORE CANDIDATE**",
+            "High Conviction": "🔵 **HIGH CONVICTION**",
+            "Invest": "🟡 **INVEST**",
+            "Watch": "⚪ **WATCH**",
+        }
+
+        for a in assets:
+            badge = tier_badges.get(a["tier"], a["tier"])
+            score_str = f"**{a['score']:.1f}**" if a["score"] else "—"
+            thesis_short = (a["thesis"][:90] + "...") if a["thesis"] and len(a["thesis"]) > 90 else (a["thesis"] or "—")
+            lines.append(
+                f"| `{a['symbol']}` | **{a['name']}** | {a['sector']} | {badge} | {score_str} | {thesis_short} | `{a['status']}` |"
+            )
+
+        if decisions:
+            lines += [
+                "",
+                "---",
+                "## 🏛️ Последние решения Инвестиционного Комитета",
+                "",
+                "| Дата | Проект | Сигнал | Вердикт | Уверенность | Резюме CFO |",
+                "|---|---|---|---|---|---|",
+            ]
+            verdict_badges = {
+                "FULL_CAF": "🔴 **FULL CAF**",
+                "INCUBATOR": "🟡 **INCUBATOR**",
+                "PASS": "⚪ **PASS**",
+            }
+            for d in decisions:
+                v_badge = verdict_badges.get(d["verdict"], d["verdict"])
+                cfo_short = (d["cfo_reasoning"][:100] + "...") if d["cfo_reasoning"] and len(d["cfo_reasoning"]) > 100 else (d["cfo_reasoning"] or "—")
+                # clean newlines in markdown table cells
+                cfo_clean = cfo_short.replace("\n", " ")
+                lines.append(
+                    f"| {d['created_at'][:16]} | **{d['name']}** (`{d['symbol']}`) | {d['signal_type']} | {v_badge} | {d['conviction_score']:.0f}% | {cfo_clean} |"
+                )
+
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        return report_path

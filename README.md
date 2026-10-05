@@ -76,13 +76,20 @@ python main.py --committee --candidates 5
 python main.py --radar --top 15
 ```
 
-### 4. Запуск фундаментального CVE-скоринга
-Оценка ключевых активов из вашего пула по 5 столпам:
+### 4. Просмотр базы данных портфеля и инкубатора
+Просмотр 50+ активов по тирам CVE и истории решений комитета:
 ```powershell
-python main.py --cve
+python main.py --registry
 ```
 
-### 4. Полный запуск (Радар + CVE Скоринг) с обновлением данных:
+### 5. Автоматический еженедельный запуск
+- В 1 клик на Windows: запустите файл **`run_radar_weekly.bat`**
+- Либо через скрипт планировщика:
+```powershell
+python scripts/scheduler.py --interval-days 7
+```
+
+### 6. Полный запуск (Радар + CVE Скоринг) с обновлением данных:
 ```powershell
 python main.py --refresh
 ```

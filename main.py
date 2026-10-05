@@ -197,6 +197,13 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
     generator = CommitteeReportGenerator()
     report_path = generator.generate(reports)
 
+    # Record to Registry Database
+    from src.database.registry import CAFRegistry
+    reg = CAFRegistry()
+    for r in reports:
+        reg.record_committee_decision(r)
+    reg_file = reg.generate_registry_markdown()
+
     # Print summary
     print("\n" + "=" * 60)
     print("[ИТОГ КОМИТЕТА]")
@@ -212,22 +219,65 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
     if verdicts["PASS"]:
         print(f"[-] ПРОПУСТИТЬ:     {', '.join(verdicts['PASS'])}")
 
-    print(f"\n[OK] Полный отчет сохранен в: {report_path}")
+    print(f"\n[OK] Полный протокол сохранен в: {report_path}")
+    print(f"[OK] База данных портфеля обновлена: {reg_file}")
     print("=" * 60)
+
+
+def run_registry_view():
+    """Displays and exports the CAF/CVE Portfolio & Incubator Registry."""
+    from src.database.registry import CAFRegistry
+    reg = CAFRegistry()
+    assets = reg.get_all_assets()
+    if not assets:
+        print("[Info] База данных пуста. Запуск наполнения из базового анализа...")
+        count = reg.seed_from_conversation()
+        print(f"[+] Добавлено {count} проектов в базу.")
+        assets = reg.get_all_assets()
+
+    report_file = reg.generate_registry_markdown()
+
+    print("\n" + "=" * 80)
+    print("📋 РЕЕСТР ПОРТФЕЛЯ И ИНКУБАТОРА CAF / CVE (БАЗА ДАННЫХ)")
+    print("=" * 80)
+    print(f"{'Тикер':<8} {'Проект':<22} {'Уровень':<18} {'Score':<6} {'Сектор':<20}")
+    print("-" * 80)
+
+    for a in assets:
+        score_str = f"{a['score']:.1f}" if a['score'] else "—"
+        name_short = (a['name'][:20] + "..") if len(a['name']) > 20 else a['name']
+        sec_short = (a['sector'][:18] + "..") if a['sector'] and len(a['sector']) > 18 else (a['sector'] or "—")
+        print(f"{a['symbol']:<8} {name_short:<22} {a['tier']:<18} {score_str:<6} {sec_short:<20}")
+
+    print("\n" + "=" * 80)
+    print(f"Всего активов в базе: {len(assets)}")
+    print(f"[OK] Полный реестр экспортирован в: {report_file}")
+    print("=" * 80)
 
 
 def main():
     parser = argparse.ArgumentParser(description="CAF-Terminal: Automated Radar & CVE Scoring")
-    parser.add_argument("--radar",     action="store_true", help="Запустить поиск Emerging/Incubator проектов")
-    parser.add_argument("--cve",       action="store_true", help="Запустить CVE скоринг ключевых активов")
-    parser.add_argument("--committee", action="store_true", help="Запустить 3-агентный инвестиционный комитет")
-    parser.add_argument("--refresh",   action="store_true", help="Игнорировать кэш и обновить данные")
-    parser.add_argument("--top",       type=int, default=15, help="Количество проектов в радаре (по умолчанию: 15)")
-    parser.add_argument("--candidates",type=int, default=5,  help="Сколько сигналов рассматривает комитет (по умолчанию: 5)")
+    parser.add_argument("--radar",      action="store_true", help="Запустить поиск Emerging/Incubator проектов")
+    parser.add_argument("--cve",        action="store_true", help="Запустить CVE скоринг ключевых активов")
+    parser.add_argument("--committee",  action="store_true", help="Запустить 3-агентный инвестиционный комитет")
+    parser.add_argument("--registry",   action="store_true", help="Показать реестр портфеля и базы проектов")
+    parser.add_argument("--seed",       action="store_true", help="Перезаполнить базу данных из истории беседы")
+    parser.add_argument("--refresh",    action="store_true", help="Игнорировать кэш и обновить данные")
+    parser.add_argument("--top",        type=int, default=15, help="Количество проектов в радаре (по умолчанию: 15)")
+    parser.add_argument("--candidates", type=int, default=5,  help="Сколько сигналов рассматривает комитет (по умолчанию: 5)")
 
     args = parser.parse_args()
 
-    if args.committee:
+    if args.seed:
+        from src.database.registry import CAFRegistry
+        reg = CAFRegistry()
+        count = reg.seed_from_conversation()
+        print(f"[+] База данных успешно наполнена {count} проектами.")
+        return
+
+    if args.registry:
+        run_registry_view()
+    elif args.committee:
         run_committee(max_candidates=args.candidates, force_refresh=args.refresh)
     elif not args.radar and not args.cve:
         print("[Info] Запуск полного цикла (Радар + CVE Скоринг)...")
