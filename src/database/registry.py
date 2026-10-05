@@ -337,66 +337,55 @@ class CAFRegistry:
             cur.execute("SELECT * FROM committee_decisions ORDER BY id DESC LIMIT ?", (limit,))
             return [dict(row) for row in cur.fetchall()]
 
-    def seed_from_conversation(self) -> int:
+    def seed_from_conversation(self, clear_existing: bool = True) -> int:
         """
-        Seeds registry with all coins evaluated during the initial CAF/CVE analysis.
+        Seeds registry with modern October 2026 CAF/CVE investment portfolio from scratch.
+        Strictly eliminates legacy zombie tokens (COMP, IOTA, NEO, etc.) and focuses on
+        real revenue, buyback & burn, DePIN cash flow, and modern high-throughput winners.
         """
+        if clear_existing:
+            with self._get_conn() as conn:
+                conn.execute("DELETE FROM assets")
+                conn.commit()
+
         initial_projects = [
-            # Candidates for Core / High Conviction
-            ("TRAC", "OriginTrail", "Decentralized Knowledge Graph / AI", "Core Candidate", "Проверяемые данные и децентрализованный граф знаний для AI и корпораций", "Конкуренция со стороны централизованных графов знаний", 88.0),
-            ("GEOD", "GEODNET", "DePIN / RTK Positioning", "Core Candidate", "DePIN для высокоточного позиционирования с подтвержденным коммерческим спросом, buyback & burn", "Зависимость от темпа физического развертывания базовых станций", 87.0),
-            ("CFG", "Centrifuge", "RWA Infrastructure", "Core Candidate", "Базовый протокол для токенизации реальных активов и связки TradFi с DeFi", "Регуляторные риски и скорость внедрения институционалами", 86.0),
-            ("SUI", "Sui", "Layer 1", "Core Candidate", "Высокопроизводительный L1 нового поколения на Move с сильной пропускной способностью", "Навес разлоков и жесткая конкуренция среди L1", 85.0),
-            ("FLUID", "Fluid (Instadapp)", "DeFi Liquidity Layer", "Core Candidate", "Единый агрегированный слой ликвидности и кредитования DeFi с высокой капиталоэффективностью", "Конкуренция с монополистами lending-рынка (Aave, Morpho)", 85.0),
-            ("MET", "Meteora", "Solana DEX Infra / DLMM", "Core Candidate", "Ликвидная инфраструктура Solana через динамические пулы DLMM", "Зависимость от экосистемы Solana и конкуренция с Raydium", 84.0),
-            ("DEEP", "DeepBook Protocol", "CLOB DEX Infra", "Core Candidate", "Центральная книга ордеров Sui, глубокая интеграция в ядро сети, buyback & burn", "Прямая зависимость от активности на Sui", 84.0),
-            ("SNX", "Synthetix", "Derivatives Infra", "Core Candidate", "Синтетические активы, v3 perpetuals и слой ликвидности деривативов", "Сложность модели и риск смарт-контрактов", 83.0),
-            ("AR", "Arweave", "Decentralized Storage / AO", "Core Candidate", "Постоянное децентрализованное хранение данных и вычислительная среда AO", "Необходимость устойчивого коммерческого спроса", 83.0),
-            ("AKT", "Akash Network", "DePIN / Cloud Compute", "High Conviction", "Децентрализованный маркетплейс вычислений и GPU для AI", "Конкуренция с централизованными облаками и Web2 агрегаторами", 81.0),
-            ("RUNE", "THORChain", "Cross-chain Liquidity", "High Conviction", "Кроссчейн-обмен нативными активами без обёрток, прямой захват ценности через пул", "Исторические риски безопасности кроссчейн-маршрутизации", 80.0),
-            ("RAY", "Raydium", "Solana DEX", "High Conviction", "Ключевой DEX Solana, агрегатор ликвидности мем-токенов и DLMM", "Высокая зависимость от мем-цикла Solana", 79.0),
-            ("EIGEN", "EigenLayer", "Restaking", "High Conviction", "Базовый уровень коллективной криптоэкономической безопасности Ethereum через restaking", "Молодой рынок restaking, AVS еще не генерируют массовый денежный поток", 79.0),
-            ("STRK", "Starknet", "Layer 2 ZK", "High Conviction", "Один из ключевых ZK L2 для Ethereum, уникальная виртуальная машина Cairo", "Высокая конкуренция среди L2, связь активности с ценностью токена еще доказывается", 78.0),
-            ("GRT", "The Graph", "Web3 Indexing", "High Conviction", "Стандарт индексации данных блокчейнов для dApps", "Не до конца доказанная прямая связь роста запросов с ценностью токена", 78.0),
-            ("ZAMA", "Zama", "FHE / Privacy", "High Conviction", "Инфраструктура конфиденциальных вычислений на полностью гомоморфном шифровании (FHE)", "Ранняя стадия технологии, тяжелые вычисления", 77.0),
-            ("1INCH", "1inch", "DEX Aggregator", "High Conviction", "Ведущий DEX-агрегатор ликвидности и маршрутизации ордеров", "Слабый прямой захват ценности токеном (governance-heavy)", 76.0),
-            ("KMNO", "Kamino Finance", "Solana DeFi", "High Conviction", "Ведущий протокол кредитования, автоматических хранилищ и левереджа на Solana", "Конкуренция внутри Solana, умеренный захват ценности", 76.0),
-            ("GLM", "Golem", "Compute", "High Conviction", "Децентрализованный рынок вычислительных мощностей", "Необходимость подтверждения устойчивого спроса", 75.0),
-            ("METIS", "Metis", "Layer 2", "High Conviction", "Ethereum L2 с децентрализованным секвенсором и AI-направлением", "Конкуренция с Arbitrum, Optimism, Base", 74.0),
-            ("NEX", "Nexus", "Verifiable Compute", "High Conviction", "Инфраструктура для верифицируемых вычислений и ZK", "Ранняя стадия, навес будущих анлоков", 74.0),
-            ("GRASS", "Grass", "DePIN / AI Data", "High Conviction", "Децентрализованная сеть веб-скрейпинга и данных для обучения AI моделей", "Юридические и операционные риски сбора веб-данных", 74.0),
-            ("BEAM", "Beam", "Web3 Gaming Infra", "High Conviction", "Игровая экосистема и сеть на Avalanche для Web3 тайтлов", "Зависимость от успеха отдельных игровых студий", 73.0),
-            ("NXPC", "NEXPACE", "Web3 Gaming / MapleStory", "High Conviction", "Web3-экономика на базе IP Nexon и MapleStory Universe", "Цикличность GameFi и удержание игроков", 73.0),
-            ("H", "Humanity Protocol", "Identity / PoH", "High Conviction", "Инфраструктура цифровой идентичности с сохранением приватности", "Массовое внедрение еще предстоит доказать", 72.0),
+            # 1. CORE TIER (55% Capital, 6 Assets, Target Score >= 86.0)
+            ("HYPE", "Hyperliquid", "Perp DEX / Sovereign L1", "Core", "Крупнейший ончейн-ордербук бессрочных фьючерсов с суверенным L1, рекордный ончейн-кэшфлоу ($500M+ годовых сборов), 100% честное распределение без хищнических венчурных анлоков", "Риск регуляторного давления на бессрочные деривативы и децентрализацию валидаторов", 89.5),
+            ("AAVE", "Aave", "DeFi Lending Monopoly", "Core", "Абсолютный гегемон кредитования в Web3 (TVL > $20B), запуск fee switch и регулярный buyback AAVE с рынка из сборов протокола", "Риск появления протоколов с изолированной ликвидностью нового поколения (Fluid, Morpho)", 88.5),
+            ("TAO", "Bittensor", "Decentralized AI / Subnets", "Core", "Базовый децентрализованный товарный слой машинного интеллекта, экономика соревновательных субсетей для AI обучения и инференса", "Высокая сложность архитектуры субсетей и зависимость от качества конкретных AI-решений", 88.0),
+            ("AKT", "Akash Network", "DePIN / GPU Cloud", "Core", "Работающий прибыльный DePIN маркетплейс GPU для AI вычислений с подтвержденной выручкой и сжиганием токенов через settlement", "Конкуренция с централизованными Web2 облаками (Lambda, CoreWeave) и доступность новейших чипов", 87.5),
+            ("RAY", "Raydium", "Solana DEX Infra", "Core", "Доминирующий генератор ончейн-комиссий в экосистеме Solana ($1M–$3M daily fees), непрерывный байбэк и сжигание RAY", "Зависимость от объемов спекулятивной активности в экосистеме Solana", 86.5),
+            ("JUP", "Jupiter", "Solana Super-App / DEX", "Core", "Финансовый хаб Solana (маршрутизация 70%+ объема), DEX + Perps + JupUSD, программа Active Staking Rewards (ASR) с распределением комиссий", "Риск снижения активности на Solana и давление от распределения ASR наград", 86.0),
 
-            # Invest Tier
-            ("TWT", "Trust Wallet Token", "Wallet Utility", "Invest", "Ключевой utility-токен популярного кошелька Trust Wallet", "Продукт успешен, но связь роста кошелька с токеном ограничена", 66.0),
-            ("TEL", "Telcoin", "Mobile Payments", "Invest", "Инфраструктура для мобильных денежных переводов через сотовых операторов", "Зависимость от регулирования и конкуренция со стейблкоинами", 64.0),
-            ("COMP", "Compound", "Lending", "Invest", "Проверенный временем протокол кредитования DeFi", "Слабая связь роста TVL с капитализацией токена управления", 63.0),
-            ("IOTA", "IOTA", "IoT / RWA", "Invest", "Инфраструктура для интернета вещей и токенизации активов", "Долгий путь к массовому коммерческому принятию", 62.0),
-            ("AXS", "Axie Infinity", "Gaming", "Invest", "Крупнейшая историческая Web3-игровая экосистема", "Цикличность Play-to-Earn и инфляция внутриигровой экономики", 60.0),
-            ("APE", "ApeCoin", "NFT / Metaverse", "Invest", "Токен экосистемы Yuga Labs и метаверс-проектов", "Зависимость от хайпа NFT и отсутствие гарантированного денежного потока", 59.0),
-            ("CHZ", "Chiliz", "Fan Tokens", "Invest", "Спортивная инфраструктура и фан-токены клубов", "Рынок фан-токенов узкий и спекулятивный", 58.0),
-            ("MANA", "Decentraland", "Metaverse", "Invest", "Децентрализованный виртуальный мир", "Ограниченное удержание ежедневных пользователей", 56.0),
-            ("SAND", "The Sandbox", "Metaverse", "Invest", "Метавселенная пользовательского контента", "Низкая активность вне маркетинговых сезонов", 56.0),
-            ("NEO", "NEO", "Layer 1", "Invest", "Платформа смарт-контрактов китайской экосистемы, двухтокеновая модель", "Слабый глобальный сетевой эффект разработчиков", 57.0),
-            ("SFP", "SafePal", "Hardware Wallet", "Invest", "Экосистема аппаратных и программных кошельков", "Токен не захватывает выручку от продажи физических кошельков", 62.0),
-            ("BAT", "Basic Attention Token", "AdTech", "Invest", "Токен внимания внутри браузера Brave", "Рост браузера слабо транслируется в рост цены BAT", 61.0),
-            ("GALA", "Gala Games", "Gaming", "Invest", "Игровая Web3 платформа и распределенная сеть нод", "Зависимость от выпуска хитовых игр и гиперинфляция наград", 58.0),
-            ("EGLD", "MultiversX", "Layer 1", "Invest", "Высокоскоростной шардированный блокчейн", "Слабый сетевой эффект экосистемы разработчиков", 60.0),
-            ("RSR", "Reserve Rights", "Stablecoin Infra", "Invest", "Протокол выпуска децентрализованных индексных стейблкоинов", "Сверхжесткая конкуренция с централизованными стейблкоинами", 61.0),
-            ("ZEN", "Horizen", "ZK Sidechains", "Invest", "Масштабируемые блокчейн-приложения через ZK-сайдчейны", "Высокая конкуренция с новыми L2", 60.0),
+            # 2. HIGH CONVICTION TIER (30% Capital, 8 Assets, Target Score 80.0 - 85.0)
+            ("SUI", "Sui", "Layer 1 Move", "High Conviction", "Самый быстрорастущий L1 нового поколения на языке Move, высокая реальная пропускная способность, институциональный приток ликвидности", "График инфляционных разблокировок токенов для ранних инвесторов", 84.5),
+            ("PENDLE", "Pendle Finance", "Yield Stripping / DeFi", "High Conviction", "Монополия на рынке торговли и фиксации ончейн-доходности, ключевой строительный блок ликвидного стейкинга и RWA", "Зависимость от циклов доходности на более широком рынке DeFi", 83.5),
+            ("ONDO", "Ondo Finance", "RWA / Tokenized Treasuries", "High Conviction", "Безоговорочный лидер сектора RWA, интеграция с BlackRock BUIDL, токенизация казначейских векселей США институционального масштаба", "Жесткие регуляторные требования SEC к ценным бумагам и юрисдикционные барьеры", 83.0),
+            ("ENA", "Ethena", "Synthetic Dollar / Basis Trade", "High Conviction", "Высокодоходный синтетический доллар USDe, генерирующий колоссальные сборы на базисной торговле бессрочными фьючерсами", "Риск отрицательных ставок фандинга (negative funding rate) на медвежьем рынке", 82.5),
+            ("GRASS", "Grass", "DePIN / AI Web Scraping", "High Conviction", "Крупнейшая пользовательская DePIN сеть для сбора и валидации чистых веб-данных для обучения LLM, прямые B2B контракты", "Юридические риски сбора веб-данных и удержание миллионов операторов нод", 82.0),
+            ("GEOD", "GEODNET", "DePIN / RTK Positioning", "High Conviction", "Глобальная сеть базовых станций высокоточного GNSS позиционирования, реальная коммерческая выручка, механизм buyback & burn", "Скорость физического развертывания наземных станций в отдаленных регионах", 81.5),
+            ("TRAC", "OriginTrail", "Decentralized Knowledge Graph", "High Conviction", "Децентрализованный граф знаний (DKG) для проверяемого AI и верификации фактов, корпоративные интеграции (BSI, GS1)", "Медленный цикл продаж в традиционном enterprise-секторе", 80.5),
+            ("RENDER", "Render Network", "DePIN / GPU Rendering & AI", "High Conviction", "Лидер децентрализованного рендеринга и AI вычислений на Solana, модель Burn-and-Mint Equilibrium (BME)", "Волатильность спроса на рендеринг и конкуренция со стороны централизованных рендер-ферм", 80.0),
 
-            # Watch Tier
-            ("WIF", "dogwifhat", "Meme", "Watch", "Мем-токен на Solana", "Полное отсутствие фундаментальной утилиты и ценности", 35.0),
-            ("CHEEMS", "Cheems", "Meme", "Watch", "Мем-токен", "Спекулятивный хайп без ценности", 30.0),
-            ("YZY", "Yeezy Money", "Celebrity / Brand", "Watch", "Платежный бренд-токен", "Экстремальная концентрация и репутационные риски", 25.0),
-            ("Melania", "Melania", "Celebrity Meme", "Watch", "Медийный хайп", "Отсутствие продукта и экономической функции", 20.0),
-            ("BANANAS31", "Banana for Scale", "Meme", "Watch", "Мем-токен", "Чистая спекуляция", 20.0),
-            ("DATA", "Streamr DATA", "Data Monetization", "Watch", "Децентрализованный брокер данных", "Отсутствие массового коммерческого спроса", 42.0),
-            ("ATH", "Aethir", "Compute / GPU", "Watch", "Рынок GPU для игр и AI", "Сомнительная экономическая устойчивость наград", 45.0),
-            ("ORDI", "ORDI", "BRC-20", "Watch", "Первый токен стандарта BRC-20 на Bitcoin", "Спекулятивный нарратив без утилиты", 40.0),
-            ("UNFI", "Unifi Protocol", "DeFi", "Watch", "Мультичейн DeFi протокол", "Слабая ликвидность и низкая активность", 38.0),
+            # 3. INCUBATOR / EMERGING TIER (15% Capital, 6 Assets, Target Score 74.0 - 79.0)
+            ("DEEP", "DeepBook Protocol", "CLOB DEX Infra", "Invest", "Центральная книга лимитных ордеров Sui, нативная интеграция в блокчейн, 100% сжигание сборов тейкеров", "Полная прямая зависимость от объема торгов внутри блокчейна Sui", 78.5),
+            ("FLUID", "Fluid (Instadapp)", "DeFi Liquidity Layer", "Invest", "Инновационный агрегированный слой кредитования и DEX с рекордной капиталоэффективностью пулов ликвидности", "Жесткая конкуренция с монополистами кредитования (Aave, Morpho)", 78.0),
+            ("DRIFT", "Drift Protocol", "Solana Perps & Prediction", "Invest", "Ведущая DEX бессрочных фьючерсов и рынков предсказаний на Solana, кросс-маржинальная архитектура", "Конкуренция с централизованными биржами и Hyperliquid", 76.5),
+            ("ATH", "Aethir", "DePIN / Enterprise Cloud", "Invest", "Корпоративная распределенная сеть мощных GPU для облачного гейминга и AI inference с институциональными контрактами", "Навес будущих разблокировок токенов и инфляция наград нодам", 75.5),
+            ("INJ", "Injective", "Financial L1 / CLOB", "Invest", "Сверхбыстрый финансовый L1 с непрерывным еженедельным ончейн-аукционом сжигания токенов из сборов экосистемных dApps", "Конкуренция за ликвидность с L1 общего назначения (Solana, Sui)", 75.0),
+            ("KMNO", "Kamino Finance", "Solana DeFi Liquidity", "Invest", "Ключевой автоматизированный движок ликвидности и кредитования на Solana (K-Lend, Multiply vaults)", "Умеренный прямой захват ценности токеном на текущем этапе", 74.0),
+
+            # 4. WATCHLIST / EMERGING RADAR (Резервная скамья — перспективные инфраструктурные активы)
+            ("SOL", "Solana", "High-Throughput L1", "Watch", "Базовый L1 высокой пропускной способности, ядро розничной ликвидности и DePIN активности", "Эмиссия инфляционных наград валидаторам", 73.0),
+            ("NEAR", "NEAR Protocol", "AI & Chain Abstraction L1", "Watch", "Ведущий блокчейн в нарративе User-Owned AI и абстракции чейнов", "Конкуренция за разработчиков dApps", 72.0),
+            ("PYTH", "Pyth Network", "Low-Latency Oracle Infra", "Watch", "Высокочастотные ценовые оракулы первого уровня для DeFi и деривативов", "Зависимость ценности токена от модели стейкинга", 71.5),
+            ("JTO", "Jito Network", "Solana MEV & Liquid Staking", "Watch", "Монополист MEV-клиента и крупнейший LST-протокол на Solana", "Governance-heavy модель распределения наград", 71.0),
+            ("MORPHO", "Morpho Labs", "Modular Lending Primitive", "Watch", "Модульный протокол изолированных кредитных рынков нового поколения", "Конкуренция с устоявшимися пулами Aave", 70.5),
+            ("EIGEN", "EigenLayer", "Ethereum Restaking Infra", "Watch", "Базовый протокол коллективной криптоэкономической безопасности через restaking", "Медленный запуск монетизации AVS сервисов", 70.0),
+            ("SAFE", "Safe", "Account Abstraction Infra", "Watch", "Стандарт мультисиг и смарт-аккаунтов институционального уровня", "Медленная трансляция сетевого эффекта в стоимость токена", 69.0),
+            ("SEI", "Sei Network", "Parallelized EVM L1", "Watch", "Параллелизованный EVM первого уровня с высокой скоростью финализации", "Необходимость формирования устойчивого DeFi ландшафта", 68.5),
+            ("TIA", "Celestia", "Modular DA Layer", "Watch", "Пионер модульной архитектуры и доступности данных (Data Availability)", "Крупные разблокировки токенов для ранних фондов", 67.0),
+            ("W", "Wormhole", "Cross-chain Messaging Infra", "Watch", "Инфраструктурный стандарт кроссчейн-коммуникации и передачи сообщений", "Низкий захват ценности токеном при высоком FDV", 65.0),
         ]
 
         count = 0
@@ -413,6 +402,7 @@ class CAFRegistry:
             )
             count += 1
 
+        self.enforce_portfolio_limit()
         return count
 
     def generate_registry_markdown(self) -> Path:

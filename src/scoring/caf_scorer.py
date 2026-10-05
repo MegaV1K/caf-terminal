@@ -81,7 +81,8 @@ class CAFScorer:
 
         # Tokens with confirmed BUYBACK & BURN, real cash flow, or protocol revenue distribution:
         REAL_VALUE_CAPTURE_TOKENS = {
-            "RAY", "GEOD", "DEEP", "RUNE", "AKT", "TRAC", "FLUID", "SNX", "GRASS", "MKR", "PUMP", "AAVE"
+            "RAY", "GEOD", "DEEP", "RUNE", "AKT", "TRAC", "FLUID", "SNX", "GRASS", "MKR", "PUMP", "AAVE",
+            "HYPE", "JUP", "TAO", "PENDLE", "ENA", "ONDO", "RENDER", "DRIFT", "INJ", "KMNO", "ATH"
         }
         # Tokens that are purely GOVERNANCE with ZERO direct cash flow to token holders:
         GOVERNANCE_ONLY_TOKENS = {
@@ -151,8 +152,8 @@ class CAFScorer:
         else:
             resilience_score = 50.0
 
-        # Ecosystem growth bonus: SUI, SOL, Move, AI, DePIN
-        if symbol_upper in ("SUI", "RAY", "AKT", "GEOD", "TRAC", "GRASS"):
+        # Ecosystem growth bonus: SUI, SOL, Move, AI, DePIN, Hyperliquid
+        if symbol_upper in ("SUI", "RAY", "AKT", "GEOD", "TRAC", "GRASS", "HYPE", "JUP", "TAO", "PENDLE", "ONDO", "RENDER", "AAVE", "ENA"):
             resilience_score = min(100.0, resilience_score + 15.0)
 
         chains = metrics.get("chains") or []
