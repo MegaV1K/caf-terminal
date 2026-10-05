@@ -23,6 +23,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
+# Telegram notifications (optional)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
 # DefiLlama Endpoints (Free, no API key required)
 DEFILLAMA_PROTOCOLS_URL = "https://api.llama.fi/protocols"
 DEFILLAMA_FEES_URL = "https://api.llama.fi/overview/fees"

@@ -55,8 +55,20 @@ def execute_cycle() -> None:
         elapsed = time.time() - start_time
         log_event(f"=== ЦИКЛ УСПЕШНО ЗАВЕРШЕН (время: {elapsed:.1f} сек) ===")
 
+        # Optional Telegram notification
+        try:
+            from src.notifications.telegram import notify
+            notify(f"<b>CAF-Terminal Scheduler</b>\nЕженедельный цикл завершен за {elapsed:.1f} сек.\nОтчеты и реестр портфеля обновлены.")
+        except Exception:
+            pass
+
     except Exception as e:
         log_event(f"[ОШИБКА В ЦИКЛЕ]: {e}")
+        try:
+            from src.notifications.telegram import notify
+            notify(f"<b>CAF-Terminal Scheduler</b>\n❌ Ошибка в цикле: {e}")
+        except Exception:
+            pass
 
 
 def main():

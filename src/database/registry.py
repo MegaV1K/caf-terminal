@@ -1,8 +1,9 @@
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 from config import DATA_DIR, REPORTS_DIR
 
 
@@ -19,10 +20,14 @@ class CAFRegistry:
         self.db_path = db_path
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_conn(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
@@ -39,7 +44,13 @@ class CAFRegistry:
                     score REAL,
                     status TEXT DEFAULT 'Active',
                     last_reviewed TEXT,
-                    updated_at TEXT
+                    updated_at TEXT,
+                    -- PnL tracking fields (v2)
+                    entry_price REAL,
+                    entry_date TEXT,
+                    target_price REAL,
+                    current_price REAL,
+                    pnl_pct REAL
                 )
             """)
 
@@ -61,7 +72,23 @@ class CAFRegistry:
                     follow_up_actions TEXT
                 )
             """)
+
+            # 3. Migrate existing DBs: add PnL columns if they don't exist
+            existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(assets)")}
+            pnl_cols = {
+                "entry_price":   "REAL",
+                "entry_date":    "TEXT",
+                "target_price":  "REAL",
+                "current_price": "REAL",
+                "pnl_pct":       "REAL",
+            }
+            for col, col_type in pnl_cols.items():
+                if col not in existing_cols:
+                    cur.execute(f"ALTER TABLE assets ADD COLUMN {col} {col_type}")
+
             conn.commit()
+
+
 
     def upsert_asset(
         self,
@@ -94,8 +121,68 @@ class CAFRegistry:
             """, (symbol.upper(), name, sector, tier, thesis, counter_thesis, score, status, now_str, now_str))
             conn.commit()
 
+    def update_price(
+        self,
+        symbol: str,
+        entry_price: Optional[float] = None,
+        entry_date: Optional[str] = None,
+        target_price: Optional[float] = None,
+        current_price: Optional[float] = None,
+    ) -> None:
+        """
+        Records entry/target/current price for PnL tracking.
+        Automatically calculates pnl_pct if both entry_price and current_price are available.
+        """
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            # Fetch current values
+            row = cur.execute(
+                "SELECT entry_price, current_price FROM assets WHERE symbol = ?",
+                (symbol.upper(),)
+            ).fetchone()
+            if not row:
+                print(f"[Registry] Symbol {symbol} not found — skipping price update.")
+                return
+
+            eff_entry = entry_price if entry_price is not None else (row["entry_price"] or 0)
+            eff_current = current_price if current_price is not None else (row["current_price"] or 0)
+            pnl = None
+            if eff_entry and eff_current:
+                pnl = round((eff_current - eff_entry) / eff_entry * 100, 2)
+
+            cur.execute("""
+                UPDATE assets SET
+                    entry_price   = COALESCE(?, entry_price),
+                    entry_date    = COALESCE(?, entry_date),
+                    target_price  = COALESCE(?, target_price),
+                    current_price = COALESCE(?, current_price),
+                    pnl_pct       = ?,
+                    updated_at    = ?
+                WHERE symbol = ?
+            """, (entry_price, entry_date, target_price, current_price, pnl, now_str, symbol.upper()))
+            conn.commit()
+
+    def get_pnl_summary(self) -> List[Dict[str, Any]]:
+        """
+        Returns list of assets with PnL data for portfolio performance review.
+        Only includes assets where entry_price is set.
+        """
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            rows = cur.execute("""
+                SELECT symbol, name, tier, entry_price, entry_date, target_price,
+                       current_price, pnl_pct, status
+                FROM assets
+                WHERE entry_price IS NOT NULL
+                ORDER BY pnl_pct DESC NULLS LAST
+            """).fetchall()
+            return [dict(r) for r in rows]
+
+
     def record_committee_decision(self, report: Any) -> None:
         """Records deliberation from Investment Committee report into database."""
+
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         s = report.signal
         actions_str = json.dumps(report.follow_up_actions, ensure_ascii=False)

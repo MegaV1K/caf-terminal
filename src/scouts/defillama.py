@@ -98,54 +98,70 @@ class DefiLlamaScout:
         protocols = self.fetch_protocols()
         fees_data = self.fetch_fees_and_revenue()
         
-        # Build lookup for fees
-        fees_by_slug = {}
+        # Build lookup for fees using stable defillamaId as primary key,
+        # with fallback to lowercase name for protocols missing the ID.
+        fees_by_id:   Dict[str, Any] = {}
+        fees_by_name: Dict[str, Any] = {}
         for p in fees_data.get("protocols", []):
-            slug = p.get("defillamaId") or p.get("name", "").lower()
-            fees_by_slug[slug] = p
+            did = p.get("defillamaId")
+            if did:
+                fees_by_id[str(did)] = p
+            name_lc = (p.get("name") or "").lower()
+            if name_lc:
+                fees_by_name[name_lc] = p
+            # Also index by module slug if present
             if p.get("module"):
-                fees_by_slug[p.get("module").lower()] = p
+                fees_by_name[p["module"].lower()] = p
 
         candidates = []
         for p in protocols:
-            tvl = p.get("tvl") or 0
-            mcap = p.get("mcap") or 0
+            tvl    = p.get("tvl") or 0
+            mcap   = p.get("mcap") or 0
             change_7d = p.get("change_7d") or 0
             change_1m = p.get("change_1m") or 0
 
             if tvl < min_tvl:
                 continue
 
-            # If mcap is available and exceeds max_mcap, skip (we look for emerging / outside giant cap)
-            if mcap > max_mcap:
+            # v2 MCap filter fix:
+            # - If MCap is known and too large → skip
+            # - If MCap unknown (0) but TVL very large → probably a giant with missing data → skip
+            if mcap > 0 and mcap > max_mcap:
+                continue
+            if mcap == 0 and tvl > 50_000_000:
                 continue
 
             if change_7d < min_change_7d and change_1m < min_change_7d:
                 continue
 
-            slug = p.get("slug", "").lower()
-            name_lower = p.get("name", "").lower()
-            fee_info = fees_by_slug.get(slug) or fees_by_slug.get(name_lower) or {}
+            # Resolve fees: try defillamaId first (stable), then name fallback
+            proto_id   = str(p.get("id") or "")
+            name_lower = (p.get("name") or "").lower()
+            fee_info   = (
+                fees_by_id.get(proto_id)
+                or fees_by_name.get(name_lower)
+                or {}
+            )
 
             # Mcap / TVL ratio (lower means fundamentally cheaper protocol TVL)
             mcap_tvl_ratio = round(mcap / tvl, 2) if tvl > 0 and mcap > 0 else None
 
             candidates.append({
-                "id": p.get("id"),
-                "name": p.get("name"),
-                "symbol": (p.get("symbol") or "").upper(),
-                "category": p.get("category", "Uncategorized"),
-                "chains": p.get("chains", []),
-                "tvl": tvl,
-                "change_1d": round(p.get("change_1d") or 0, 2),
-                "change_7d": round(change_7d, 2),
-                "change_1m": round(change_1m, 2),
-                "mcap": mcap if mcap > 0 else None,
+                "id":           p.get("id"),
+                "name":         p.get("name"),
+                "symbol":       (p.get("symbol") or "").upper(),
+                "category":     p.get("category", "Uncategorized"),
+                "chains":       p.get("chains", []),
+                "tvl":          tvl,
+                "change_1d":    round(p.get("change_1d") or 0, 2),
+                "change_7d":    round(change_7d, 2),
+                "change_1m":    round(change_1m, 2),
+                "mcap":         mcap if mcap > 0 else None,
                 "mcap_tvl_ratio": mcap_tvl_ratio,
-                "daily_fees": fee_info.get("total24h"),
+                "daily_fees":   fee_info.get("total24h"),
                 "daily_revenue": fee_info.get("totalRevenue24h"),
-                "url": p.get("url"),
-                "gecko_id": p.get("gecko_id"),
+                "url":          p.get("url"),
+                "gecko_id":     p.get("gecko_id"),
             })
 
         # Sort by 7-day TVL growth descending

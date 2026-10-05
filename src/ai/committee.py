@@ -2,35 +2,28 @@
 Multi-Agent Investment Committee for CAF-Terminal.
 
 Architecture:
-  SignalScout  → detects strong signals from data sources
-  Analyst      → builds investment thesis for a candidate
-  Skeptic      → systematically attacks that thesis
-  CFO          → hears both sides and makes the final call
+  SignalDetector → detects strong signals from data sources
+  AnalystAgent   → builds investment thesis for a candidate
+  SkepticAgent   → systematically attacks that thesis
+  CFOAgent       → hears both sides and makes the final call (JSON output)
 
 Decision flow:
-  SignalScout fires → Analyst drafts thesis → Skeptic tears it apart
+  SignalDetector fires → Analyst drafts thesis → Skeptic tears it apart
   → CFO renders verdict: INCUBATOR | FULL_CAF | PASS
+
+v2 Improvements:
+  - Fixed MCap filter: protocols with mcap=0 are now filtered by TVL proxy ($50M cap)
+  - CFO uses structured JSON output instead of regex parsing
+  - Migrated to google.genai SDK (no more FutureWarning)
+  - Model cascade via shared gemini_client module
 """
 
 import json
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
-import google.generativeai as genai
-from config import GEMINI_API_KEY, GEMINI_MODEL
 
-
-# ── Setup ─────────────────────────────────────────────────────────────────────
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-
-def _make_model() -> Optional[genai.GenerativeModel]:
-    if not GEMINI_API_KEY:
-        return None
-    return genai.GenerativeModel(GEMINI_MODEL)
+from src.ai.gemini_client import generate, generate_json
 
 
 # ── Domain types ──────────────────────────────────────────────────────────────
@@ -47,7 +40,7 @@ class Signal:
     name: str
     symbol: str
     category: str
-    signal_type: str          # e.g. "TVL_SPIKE", "REVENUE_SURGE", "DEV_ACTIVITY_SURGE", "VOLUME_ANOMALY", "TRENDING_ATTENTION"
+    signal_type: str          # e.g. "TVL_SPIKE", "REVENUE_SURGE", "DEV_ACTIVITY_SURGE"
     signal_strength: float    # 0-100
     tvl: Optional[float] = None
     change_7d: Optional[float] = None
@@ -84,20 +77,26 @@ class SignalDetector:
     something UNUSUAL is happening. Only those trigger the committee.
 
     Filters applied in order:
-    1. TVL must be > min_tvl ($1M) — proof of real capital
-    2. MCap must be < max_mcap ($300M) — we want EMERGING, not blue chips
+    1. TVL must be > min_tvl ($2M) — proof of real capital
+    2. MCap filter (v2 fix):
+       - If mcap is known and > $300M → skip (not emerging)
+       - If mcap is unknown (0/null) AND tvl > $50M → skip (large protocol, just no data)
     3. At least ONE strong signal must fire:
        - TVL_SPIKE:          7d TVL growth > 30%
        - REVENUE_SURGE:      daily fees > $10k AND fees/TVL > 0.5%
        - CAPITAL_EFFICIENCY: fees/TVL > 2% (hidden gem economics)
        - NEW_SECTOR:         category we haven't tracked before
+       - DEV_ACTIVITY_SURGE: GitHub commits/score above threshold
     """
 
-    TVL_SPIKE_THRESHOLD    = 30.0      # % 7d TVL growth (was 20 — too noisy)
-    REVENUE_SURGE_MIN      = 10_000    # USD daily fees/revenue (was 5k)
-    FEE_TVL_RATIO_MIN      = 0.005     # 0.5% daily fees/TVL (was 0.01 → 1%)
+    TVL_SPIKE_THRESHOLD    = 30.0      # % 7d TVL growth
+    REVENUE_SURGE_MIN      = 10_000    # USD daily fees
+    FEE_TVL_RATIO_MIN      = 0.005     # 0.5% daily fees/TVL
     CAPITAL_EFF_THRESHOLD  = 0.02      # 2% daily fees/TVL = ultra-efficient
     UNLOCK_RISK_RATIO      = 5.0       # FDV/MCap above this → dilution danger
+
+    # v2: If mcap is unknown (0), cap TVL at this value to avoid passing giants
+    MAX_TVL_WHEN_MCAP_UNKNOWN = 50_000_000  # $50M TVL proxy for "unknown mcap but large"
 
     def detect(
         self,
@@ -106,8 +105,8 @@ class SignalDetector:
         volume_anomalies: Optional[List[Dict[str, Any]]] = None,
         trending_coins: Optional[List[Dict[str, Any]]] = None,
         github_scout: Optional[Any] = None,
-        min_tvl: float = 2_000_000,    # raised from $500k to $2M
-        max_mcap: float = 300_000_000, # lowered from $2B to $300M (truly emerging)
+        min_tvl: float = 2_000_000,
+        max_mcap: float = 300_000_000,
     ) -> List[Signal]:
         """
         Scans multi-source data: DefiLlama (TVL/fees), CoinGecko (volume/trending),
@@ -116,7 +115,7 @@ class SignalDetector:
         """
         signals: List[Signal] = []
         known_categories = known_categories or set()
-        seen_symbols = set()
+        seen_symbols: set = set()
 
         # 1. Process On-Chain Protocols (DefiLlama + GitHub)
         for p in protocols:
@@ -130,9 +129,17 @@ class SignalDetector:
             name     = p.get("name", "")
             symbol   = (p.get("symbol") or "").upper()
 
+            # Gate 1: minimum TVL (real capital at risk)
             if tvl < min_tvl:
                 continue
-            if mcap > max_mcap and mcap > 0:
+
+            # Gate 2 (v2 fix): MCap filter that handles unknown MCap correctly
+            if mcap > 0 and mcap > max_mcap:
+                # Known large-cap → skip, not emerging
+                continue
+            elif mcap == 0 and tvl > self.MAX_TVL_WHEN_MCAP_UNKNOWN:
+                # Unknown MCap + very large TVL → probably a giant (Lido, AAVE, etc.)
+                # with missing data; skip to avoid false positives
                 continue
 
             triggered_signals = []
@@ -164,6 +171,9 @@ class SignalDetector:
             dev_metrics = {}
             if github_scout and symbol:
                 repo_name = github_scout.get_repo_for_symbol(symbol)
+                if not repo_name:
+                    # Try dynamic search if not in KNOWN_REPOS
+                    repo_name = github_scout.search_repo(name)
                 if repo_name:
                     dev_metrics = github_scout.fetch_repo_metrics(repo_name)
                     commits = dev_metrics.get("commits_30d", 0)
@@ -205,14 +215,15 @@ class SignalDetector:
                     continue  # already evaluated with on-chain data
 
                 ratio = va.get("vol_mcap_ratio", 0)
-                if ratio >= 0.35:  # high turnover
+                if ratio >= 0.35:  # high turnover signal
                     strength = min(100.0, 45.0 + ratio * 40.0)
                     seen_symbols.add(sym)
 
-                    # Check dev metrics if repo known
                     dev_metrics = {}
                     if github_scout:
                         repo = github_scout.get_repo_for_symbol(sym)
+                        if not repo:
+                            repo = github_scout.search_repo(va.get("name", sym))
                         if repo:
                             dev_metrics = github_scout.fetch_repo_metrics(repo)
 
@@ -252,77 +263,39 @@ class SignalDetector:
         return signals
 
 
-# ── Agent Base ─────────────────────────────────────────────────────────────────
+# ── Shared formatting ──────────────────────────────────────────────────────────
 
-class _BaseAgent:
-    ROLE: str = "Agent"
-    SYSTEM_PROMPT: str = ""
-
-    def __init__(self):
-        self.model = _make_model()
-
-    def _call(self, user_message: str) -> str:
-        if not GEMINI_API_KEY:
-            return f"[{self.ROLE}] API key not configured."
-
-        models_to_try = [
-            "gemini-3.8-flash",
-            "gemini-3.7-flash",
-            "gemini-flash-latest",
-        ]
-        # Remove duplicates while preserving order
-        unique_models = list(dict.fromkeys(models_to_try))
-
-        full_prompt = f"{self.SYSTEM_PROMPT}\n\n{user_message}"
-        last_error = None
-
-        for model_name in unique_models:
-            try:
-                time.sleep(1.5)  # Avoid bursting free-tier RPM limits
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(full_prompt)
-                return response.text.strip()
-            except Exception as e:
-                err_str = str(e)
-                last_error = err_str
-                if "429" in err_str or "quota" in err_str.lower() or "404" in err_str:
-                    continue
-                else:
-                    return f"[{self.ROLE}] Error: {err_str}"
-
-        return f"[{self.ROLE}] Error (quota exceeded on all models): {last_error}"
-
-    @staticmethod
-    def _format_signal(s: Signal) -> str:
-        tvl_str   = f"${s.tvl:,.0f}"   if s.tvl   else "N/A"
-        mcap_str  = f"${s.mcap:,.0f}"  if s.mcap  else "N/A"
-        fees_str  = f"${s.daily_fees:,.0f}" if s.daily_fees else "N/A"
-        rev_str   = f"${s.daily_revenue:,.0f}" if s.daily_revenue else "N/A"
-        fdv_str   = f"{s.fdv_mcap_ratio:.2f}x" if s.fdv_mcap_ratio else "N/A"
-        c7d_str   = f"+{s.change_7d:.1f}%" if s.change_7d and s.change_7d > 0 else (f"{s.change_7d:.1f}%" if s.change_7d else "N/A")
-        vol_str   = f"{s.vol_mcap_ratio:.2f}x" if s.vol_mcap_ratio else "N/A"
-        dev_str   = f"{s.dev_score:.0f}/100 (Commits 30d: {s.commits_30d or 0}, repo: {s.github_repo})" if s.dev_score is not None else "N/A"
-        return (
-            f"Project: {s.name} ({s.symbol})\n"
-            f"Sector: {s.category}\n"
-            f"Signal: {s.signal_type} (strength {s.signal_strength}/100)\n"
-            f"TVL: {tvl_str} | 7d TVL: {c7d_str}\n"
-            f"Daily Fees: {fees_str} | Daily Revenue: {rev_str}\n"
-            f"MCap: {mcap_str} | FDV/MCap: {fdv_str} | Volume/MCap: {vol_str}\n"
-            f"Developer Health (GitHub): {dev_str}\n"
-            f"Chains: {', '.join(s.chains[:4]) or 'Unknown'}\n"
-            f"Notes: {s.notes}"
-        )
+def _format_signal(s: Signal) -> str:
+    tvl_str  = f"${s.tvl:,.0f}"   if s.tvl   else "N/A"
+    mcap_str = f"${s.mcap:,.0f}"  if s.mcap  else "N/A"
+    fees_str = f"${s.daily_fees:,.0f}" if s.daily_fees else "N/A"
+    rev_str  = f"${s.daily_revenue:,.0f}" if s.daily_revenue else "N/A"
+    fdv_str  = f"{s.fdv_mcap_ratio:.2f}x" if s.fdv_mcap_ratio else "N/A"
+    c7d_str  = (f"+{s.change_7d:.1f}%" if (s.change_7d or 0) > 0
+                else (f"{s.change_7d:.1f}%" if s.change_7d else "N/A"))
+    vol_str  = f"{s.vol_mcap_ratio:.2f}x" if s.vol_mcap_ratio else "N/A"
+    dev_str  = (
+        f"{s.dev_score:.0f}/100 (Commits 30d: {s.commits_30d or 0}, repo: {s.github_repo})"
+        if s.dev_score is not None else "N/A"
+    )
+    return (
+        f"Project: {s.name} ({s.symbol})\n"
+        f"Sector: {s.category}\n"
+        f"Signal: {s.signal_type} (strength {s.signal_strength}/100)\n"
+        f"TVL: {tvl_str} | 7d TVL: {c7d_str}\n"
+        f"Daily Fees: {fees_str} | Daily Revenue: {rev_str}\n"
+        f"MCap: {mcap_str} | FDV/MCap: {fdv_str} | Volume/MCap: {vol_str}\n"
+        f"Developer Health (GitHub): {dev_str}\n"
+        f"Chains: {', '.join(s.chains[:4]) or 'Unknown'}\n"
+        f"Notes: {s.notes}"
+    )
 
 
 # ── Analyst Agent ──────────────────────────────────────────────────────────────
 
-class AnalystAgent(_BaseAgent):
-    """
-    Role: builds an investment thesis.
-    Asks: "Why SHOULD we look at this?"
-    """
-    ROLE = "Analyst"
+class AnalystAgent:
+    """Role: builds an investment thesis. Asks: 'Why SHOULD we look at this?'"""
+
     SYSTEM_PROMPT = """Ты — криптовалютный аналитик с опытом работы в венчурном фонде.
 Твоя задача: для каждого проекта сформулировать ИНВЕСТИЦИОННЫЙ ТЕЗИС по методологии CAF/CVE.
 Структура ответа всегда строго такая:
@@ -340,18 +313,15 @@ class AnalystAgent(_BaseAgent):
 Лаконично, конкретно, только факты и логика. Без воды. На русском языке."""
 
     def build_thesis(self, signal: Signal) -> str:
-        prompt = f"Построй инвестиционный тезис для следующего проекта:\n\n{self._format_signal(signal)}"
-        return self._call(prompt)
+        prompt = f"Построй инвестиционный тезис для следующего проекта:\n\n{_format_signal(signal)}"
+        return generate(prompt, system_instruction=self.SYSTEM_PROMPT)
 
 
 # ── Skeptic Agent ──────────────────────────────────────────────────────────────
 
-class SkepticAgent(_BaseAgent):
-    """
-    Role: systematically attacks the analyst's thesis.
-    Asks: "Why SHOULDN'T we touch this?"
-    """
-    ROLE = "Skeptic"
+class SkepticAgent:
+    """Role: systematically attacks the analyst's thesis. Asks: 'Why SHOULDN'T we touch this?'"""
+
     SYSTEM_PROMPT = """Ты — жёсткий риск-менеджер и скептик криптовалютных инвестиций.
 Твоя задача: разобрать инвестиционный тезис аналитика и найти всё, что могло пойти не так.
 Ты НЕ должен быть вежливым. Ты должен быть честным.
@@ -377,98 +347,85 @@ class SkepticAgent(_BaseAgent):
         prompt = (
             f"Тезис аналитика по проекту {signal.name} ({signal.symbol}):\n\n"
             f"{analyst_thesis}\n\n"
-            f"Данные проекта:\n{self._format_signal(signal)}\n\n"
+            f"Данные проекта:\n{_format_signal(signal)}\n\n"
             "Разбери этот тезис. Найди всё слабое. Не жалей."
         )
-        return self._call(prompt)
+        return generate(prompt, system_instruction=self.SYSTEM_PROMPT)
 
 
 # ── CFO Agent ──────────────────────────────────────────────────────────────────
 
-class CFOAgent(_BaseAgent):
+class CFOAgent:
     """
     Role: hears analyst + skeptic, makes the final capital allocation decision.
-    Asks: "Given both views, where does the risk/reward land?"
-    Outputs: Verdict + conviction + follow-up actions.
+    v2: Uses structured JSON output for reliable verdict parsing.
     """
-    ROLE = "CFO"
+
     SYSTEM_PROMPT = """Ты — финансовый директор крипто-инвестиционного фонда.
 Ты только что выслушал аналитика (тезис) и скептика (критику) по одному проекту.
 Твоя задача: принять ОКОНЧАТЕЛЬНОЕ РЕШЕНИЕ по методологии CAF.
 
 Три возможных решения:
-- **FULL_CAF**: Немедленно начать полный 5-столповый CAF-анализ. Только если сигналы очень сильные и риски управляемы.
-- **INCUBATOR**: Добавить в список наблюдения. Сделать быстрый 15-минутный CAF-скрининг через месяц при подтверждении данных.
-- **PASS**: Игнорировать полностью. Не тратить больше времени.
+- FULL_CAF: Немедленно начать полный 5-столповый CAF-анализ. Только если сигналы очень сильные и риски управляемы.
+- INCUBATOR: Добавить в список наблюдения. Сделать быстрый 15-минутный CAF-скрининг через месяц.
+- PASS: Игнорировать полностью. Не тратить больше времени.
 
-Структура ответа:
+Отвечай СТРОГО в формате JSON (никакого текста вне JSON):
+{
+  "verdict": "FULL_CAF | INCUBATOR | PASS",
+  "conviction": <число от 0 до 100>,
+  "reasoning": "<3-5 предложений почему именно это решение>",
+  "next_steps": ["<действие 1>", "<действие 2>", "<действие 3>"]
+}
 
-**РЕШЕНИЕ: [FULL_CAF / INCUBATOR / PASS]**
-
-**УВЕРЕННОСТЬ: [0-100]%**
-
-**ОБОСНОВАНИЕ:**
-Почему именно это решение — 3-5 предложений. Взвесь аналитика против скептика.
-
-**СЛЕДУЮЩИЕ ШАГИ:**
-- Конкретные действия (что проверить, когда, какие метрики отслеживать).
-
-Будь решительным. Нет — значит нет. Да — значит да. На русском языке."""
+Будь решительным. На русском языке."""
 
     def decide(self, signal: Signal, analyst_thesis: str, skeptic_critique: str) -> CommitteeReport:
         prompt = (
             f"ПРОЕКТ: {signal.name} ({signal.symbol})\n\n"
             f"=== ТЕЗИС АНАЛИТИКА ===\n{analyst_thesis}\n\n"
             f"=== КРИТИКА СКЕПТИКА ===\n{skeptic_critique}\n\n"
-            f"=== ДАННЫЕ ===\n{self._format_signal(signal)}\n\n"
-            "Вынеси решение."
+            f"=== ДАННЫЕ ===\n{_format_signal(signal)}\n\n"
+            "Вынеси решение в формате JSON."
         )
-        raw = self._call(prompt)
 
-        # Parse verdict from response
-        verdict = Verdict.PASS
-        if "FULL_CAF" in raw:
+        data = generate_json(
+            prompt,
+            system_instruction=self.SYSTEM_PROMPT,
+            fallback={"verdict": "PASS", "conviction": 50, "reasoning": "Parse error", "next_steps": []},
+        )
+
+        # Safe verdict parsing from structured JSON
+        raw_verdict = str(data.get("verdict", "PASS")).upper().strip()
+        if raw_verdict == "FULL_CAF":
             verdict = Verdict.FULL_CAF
-        elif "INCUBATOR" in raw:
+        elif raw_verdict == "INCUBATOR":
             verdict = Verdict.INCUBATOR
+        else:
+            verdict = Verdict.PASS
 
-        # Parse conviction score
-        conviction = 50.0
-        for line in raw.splitlines():
-            if "УВЕРЕННОСТЬ" in line or "уверенность" in line:
-                import re
-                match = re.search(r"(\d+)", line)
-                if match:
-                    conviction = float(match.group(1))
-                break
-
-        # Extract follow-up actions (lines starting with -)
-        actions = []
-        in_actions = False
-        for line in raw.splitlines():
-            if "СЛЕДУЮЩИЕ ШАГИ" in line or "следующие шаги" in line.lower():
-                in_actions = True
-                continue
-            if in_actions and line.strip().startswith("-"):
-                actions.append(line.strip().lstrip("- "))
+        conviction = float(data.get("conviction", 50))
+        conviction = max(0.0, min(100.0, conviction))  # clamp to [0, 100]
+        reasoning = data.get("reasoning", "")
+        next_steps = data.get("next_steps", [])
+        if isinstance(next_steps, str):
+            next_steps = [next_steps]
 
         return CommitteeReport(
             signal=signal,
             analyst_thesis=analyst_thesis,
             skeptic_critique=skeptic_critique,
-            cfo_reasoning=raw,
+            cfo_reasoning=reasoning,
             verdict=verdict,
             conviction_score=conviction,
-            follow_up_actions=actions,
+            follow_up_actions=next_steps,
         )
 
 
 # ── Investment Committee ────────────────────────────────────────────────────────
 
 class InvestmentCommittee:
-    """
-    Orchestrates the 3-agent deliberation for a single signal.
-    """
+    """Orchestrates the 3-agent deliberation for a single signal."""
 
     def __init__(self):
         self.analyst = AnalystAgent()
@@ -487,15 +444,14 @@ class InvestmentCommittee:
         print("[SKEPTIC]  Атакую тезис...")
         critique = self.skeptic.critique(signal, thesis)
 
-        print("[CFO]      Принимаю решение...")
+        print("[CFO]      Принимаю решение (JSON)...")
         report = self.cfo.decide(signal, thesis, critique)
 
         verdict_display = {
-            Verdict.FULL_CAF:  "FULL CAF - СРОЧНЫЙ АНАЛИЗ",
-            Verdict.INCUBATOR: "INCUBATOR - ДОБАВИТЬ В НАБЛЮДЕНИЕ",
-            Verdict.PASS:      "PASS - ПРОПУСТИТЬ",
+            Verdict.FULL_CAF:  "[!!!] FULL CAF - СРОЧНЫЙ АНАЛИЗ",
+            Verdict.INCUBATOR: "[+]   INCUBATOR - ДОБАВИТЬ В НАБЛЮДЕНИЕ",
+            Verdict.PASS:      "[-]   PASS - ПРОПУСТИТЬ",
         }
-
         print(f"\n  ВЕРДИКТ: {verdict_display[report.verdict]} (уверенность {report.conviction_score:.0f}%)")
         return report
 
@@ -509,12 +465,12 @@ class InvestmentCommittee:
         max_candidates: int = 5,
     ) -> List[CommitteeReport]:
         """
-        Monthly radar run across multi-source signals (DefiLlama, CoinGecko, GitHub).
-        Only processes top signals — not the whole market.
+        Monthly radar run across multi-source signals.
+        Only processes top N signals — not the whole market.
         Returns committee reports sorted by verdict priority (FULL_CAF first).
         """
         print("\n" + "="*60)
-        print("[COMMITTEE] ЕЖЕМЕСЯЧНЫЙ СКАН: ПОИСК СИГНАЛОВ (DefiLlama + CoinGecko + GitHub)")
+        print("[COMMITTEE] ЕЖЕМЕСЯЧНЫЙ СКАН: ПОИСК СИГНАЛОВ")
         print("="*60)
 
         detector = SignalDetector()
@@ -527,10 +483,9 @@ class InvestmentCommittee:
         )
 
         if not signals:
-            print("[!] Нет сильных сигналов в этом месяце. Пропускаем.")
+            print("[!] Нет сильных сигналов в этом цикле. Пропускаем.")
             return []
 
-        # Only deliberate on top N signals to avoid cost/time overload
         top_signals = signals[:max_candidates]
         print(f"[+] Обнаружено {len(signals)} сигналов. Комитет рассматривает топ-{len(top_signals)}.\n")
 

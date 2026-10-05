@@ -67,6 +67,13 @@ def run_emerging_radar(top_n: int = 15, force_refresh: bool = False):
     print(f"[OK] Отчет сохранен в файл: {report_file}")
     print("=" * 60)
 
+    # Optional Telegram Alert
+    try:
+        from src.notifications.telegram import notify_radar_results
+        notify_radar_results(candidates, top_n=top_n)
+    except Exception:
+        pass
+
 
 def run_cve_scoring(tokens_list: list = None, force_refresh: bool = False):
     """Scores key tokens from the CVE portfolio / conversation."""
@@ -156,13 +163,23 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
     protocols = llama.fetch_protocols(force_refresh=force_refresh)
     fees_data = llama.fetch_fees_and_revenue(force_refresh=force_refresh)
 
-    fees_by_name = {}
+    # Robust fees join: use defillamaId as primary key, lowercase name as fallback
+    fees_by_id: dict = {}
+    fees_by_name: dict = {}
     for p in fees_data.get("protocols", []):
-        fees_by_name[(p.get("name") or "").lower()] = p
+        did = p.get("defillamaId")
+        if did:
+            fees_by_id[str(did)] = p
+        name_lc = (p.get("name") or "").lower()
+        if name_lc:
+            fees_by_name[name_lc] = p
+        if p.get("module"):
+            fees_by_name[p["module"].lower()] = p
 
     for p in protocols:
+        proto_id = str(p.get("id") or "")
         name_key = (p.get("name") or "").lower()
-        fee_info = fees_by_name.get(name_key, {})
+        fee_info = fees_by_id.get(proto_id) or fees_by_name.get(name_key) or {}
         if fee_info:
             p["daily_fees"] = fee_info.get("total24h")
             p["daily_revenue"] = fee_info.get("totalRevenue24h")
@@ -203,6 +220,13 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
     for r in reports:
         reg.record_committee_decision(r)
     reg_file = reg.generate_registry_markdown()
+
+    # Optional Telegram Alert
+    try:
+        from src.notifications.telegram import notify_committee_results
+        notify_committee_results(reports)
+    except Exception:
+        pass
 
     # Print summary
     print("\n" + "=" * 60)
@@ -255,12 +279,62 @@ def run_registry_view():
     print("=" * 80)
 
 
+def run_pnl_view():
+    """Displays portfolio PnL performance table."""
+    from src.database.registry import CAFRegistry
+    reg = CAFRegistry()
+    summary = reg.get_pnl_summary()
+    if not summary:
+        print("\n" + "=" * 80)
+        print("📊 PnL ТРЕКИНГ ПОРТФЕЛЯ (БАЗА ДАННЫХ)")
+        print("=" * 80)
+        print("[!] Нет активов с заданной ценой входа.")
+        print("    Чтобы добавить актив в трекинг цен, используйте команду:")
+        print("    python main.py --set-price --symbol SUI --entry 1.85 --current 2.10 --target 4.50")
+        print("=" * 80)
+        return
+
+    print("\n" + "=" * 80)
+    print("📊 PnL ТРЕКИНГ ПОРТФЕЛЯ")
+    print("=" * 80)
+    print(f"{'Тикер':<8} {'Проект':<18} {'Уровень':<16} {'Вход':<10} {'Текущая':<10} {'Цель':<10} {'PnL %':<10}")
+    print("-" * 80)
+    for a in summary:
+        e_str = f"${a['entry_price']:.3f}" if a['entry_price'] else "—"
+        c_str = f"${a['current_price']:.3f}" if a['current_price'] else "—"
+        t_str = f"${a['target_price']:.3f}" if a['target_price'] else "—"
+        pnl = a['pnl_pct']
+        pnl_str = f"{pnl:+.1f}%" if pnl is not None else "—"
+        print(f"{a['symbol']:<8} {a['name'][:16]:<18} {a['tier']:<16} {e_str:<10} {c_str:<10} {t_str:<10} {pnl_str:<10}")
+    print("=" * 80)
+
+
+def run_set_price(symbol: str, entry: float = None, current: float = None, target: float = None):
+    """Sets entry/current/target price for an asset."""
+    from src.database.registry import CAFRegistry
+    reg = CAFRegistry()
+    reg.update_price(
+        symbol=symbol,
+        entry_price=entry,
+        current_price=current,
+        target_price=target,
+    )
+    print(f"[OK] Цены для {symbol.upper()} успешно обновлены в базе данных.")
+    run_pnl_view()
+
+
 def main():
     parser = argparse.ArgumentParser(description="CAF-Terminal: Automated Radar & CVE Scoring")
     parser.add_argument("--radar",      action="store_true", help="Запустить поиск Emerging/Incubator проектов")
     parser.add_argument("--cve",        action="store_true", help="Запустить CVE скоринг ключевых активов")
     parser.add_argument("--committee",  action="store_true", help="Запустить 3-агентный инвестиционный комитет")
     parser.add_argument("--registry",   action="store_true", help="Показать реестр портфеля и базы проектов")
+    parser.add_argument("--pnl",        action="store_true", help="Показать таблицу PnL доходности портфеля")
+    parser.add_argument("--set-price",  action="store_true", help="Обновить цены входа/цели/текущую для токена")
+    parser.add_argument("--symbol",     type=str, default="", help="Тикер токена для обновления цены")
+    parser.add_argument("--entry",      type=float, default=None, help="Цена входа ($)")
+    parser.add_argument("--current",    type=float, default=None, help="Текущая рыночная цена ($)")
+    parser.add_argument("--target",     type=float, default=None, help="Целевая цена ($)")
     parser.add_argument("--seed",       action="store_true", help="Перезаполнить базу данных из истории беседы")
     parser.add_argument("--refresh",    action="store_true", help="Игнорировать кэш и обновить данные")
     parser.add_argument("--top",        type=int, default=15, help="Количество проектов в радаре (по умолчанию: 15)")
@@ -273,6 +347,17 @@ def main():
         reg = CAFRegistry()
         count = reg.seed_from_conversation()
         print(f"[+] База данных успешно наполнена {count} проектами.")
+        return
+
+    if args.set_price:
+        if not args.symbol:
+            print("[!] Укажите тикер токена: --symbol TICKER")
+            return
+        run_set_price(args.symbol, entry=args.entry, current=args.current, target=args.target)
+        return
+
+    if args.pnl:
+        run_pnl_view()
         return
 
     if args.registry:
@@ -292,3 +377,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
