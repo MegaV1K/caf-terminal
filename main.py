@@ -13,6 +13,7 @@ from src.scouts.defillama import DefiLlamaScout
 from src.scouts.coingecko import CoinGeckoScout
 from src.scoring.caf_scorer import CAFScorer
 from src.reports.report_generator import ReportGenerator
+from src.ai.llm_agent import LLMAgent
 
 
 def run_emerging_radar(top_n: int = 15, force_refresh: bool = False):
@@ -50,9 +51,18 @@ def run_emerging_radar(top_n: int = 15, force_refresh: bool = False):
         name_short = (c['name'][:20] + "..") if len(c['name']) > 20 else c['name']
         print(f"{i:<3} {c['symbol']:<8} {name_short:<22} {c['category'][:14]:<15} {tvl_str:<12} {c7d_str:<8} {c['radar_score']:<6}")
 
+    # Generate AI Summary
+    llm = LLMAgent()
+    ai_summary = llm.summarize_candidates(candidates[:top_n])
+    
+    print("\n" + "*" * 60)
+    print("🤖 АНАЛИТИКА ОТ AI (GEMINI):")
+    print("*" * 60)
+    print(ai_summary)
+
     # Generate Reports
     reporter = ReportGenerator()
-    report_file = reporter.generate_emerging_radar_report(candidates, top_n=top_n)
+    report_file = reporter.generate_emerging_radar_report(candidates, top_n=top_n, ai_summary=ai_summary)
     print("\n" + "=" * 60)
     print(f"[OK] Отчет сохранен в файл: {report_file}")
     print("=" * 60)
@@ -128,17 +138,83 @@ def run_cve_scoring(tokens_list: list = None, force_refresh: bool = False):
     print("=" * 60)
 
 
+def run_committee(max_candidates: int = 5, force_refresh: bool = False):
+    """Runs the 3-agent Investment Committee monthly scan."""
+    from src.ai.committee import InvestmentCommittee
+    from src.reports.committee_report import CommitteeReportGenerator
+
+    print("\n" + "=" * 60)
+    print("[COMMITTEE] ИНВЕСТИЦИОННЫЙ КОМИТЕТ: ЕЖЕМЕСЯЧНЫЙ СКАН")
+    print("=" * 60)
+    print("Агенты: Analyst (тезис) | Skeptic (критика) | CFO (решение)")
+    print(f"Кандидатов на рассмотрение: топ-{max_candidates} по силе сигнала")
+    print("=" * 60)
+
+    # Fetch raw data
+    llama = DefiLlamaScout()
+    protocols = llama.fetch_protocols(force_refresh=force_refresh)
+    fees_data = llama.fetch_fees_and_revenue(force_refresh=force_refresh)
+
+    # Merge fee data into protocols for signal detection
+    fees_by_name = {}
+    for p in fees_data.get("protocols", []):
+        fees_by_name[(p.get("name") or "").lower()] = p
+
+    for p in protocols:
+        name_key = (p.get("name") or "").lower()
+        fee_info = fees_by_name.get(name_key, {})
+        if fee_info:
+            p["daily_fees"] = fee_info.get("total24h")
+            p["daily_revenue"] = fee_info.get("totalRevenue24h")
+
+    # Run committee
+    committee = InvestmentCommittee()
+    reports = committee.run_monthly_scan(
+        protocols=protocols,
+        max_candidates=max_candidates,
+    )
+
+    if not reports:
+        print("[!] Комитет не нашел достаточно сильных сигналов в этом месяце.")
+        return
+
+    # Save report
+    generator = CommitteeReportGenerator()
+    report_path = generator.generate(reports)
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("[ИТОГ КОМИТЕТА]")
+    print("=" * 60)
+    verdicts = {"FULL_CAF": [], "INCUBATOR": [], "PASS": []}
+    for r in reports:
+        verdicts[r.verdict.value].append(f"{r.signal.name} ({r.signal.symbol})")
+
+    if verdicts["FULL_CAF"]:
+        print(f"[!] СРОЧНЫЙ АНАЛИЗ: {', '.join(verdicts['FULL_CAF'])}")
+    if verdicts["INCUBATOR"]:
+        print(f"[~] ИНКУБАТОР:      {', '.join(verdicts['INCUBATOR'])}")
+    if verdicts["PASS"]:
+        print(f"[-] ПРОПУСТИТЬ:     {', '.join(verdicts['PASS'])}")
+
+    print(f"\n[OK] Полный отчет сохранен в: {report_path}")
+    print("=" * 60)
+
+
 def main():
     parser = argparse.ArgumentParser(description="CAF-Terminal: Automated Radar & CVE Scoring")
-    parser.add_argument("--radar", action="store_true", help="Запустить поиск Emerging/Incubator проектов")
-    parser.add_argument("--cve", action="store_true", help="Запустить CVE скоринг ключевых активов")
-    parser.add_argument("--refresh", action="store_true", help="Игнорировать кэш и обновить данные")
-    parser.add_argument("--top", type=int, default=15, help="Количество проектов в радаре (по умолчанию: 15)")
+    parser.add_argument("--radar",     action="store_true", help="Запустить поиск Emerging/Incubator проектов")
+    parser.add_argument("--cve",       action="store_true", help="Запустить CVE скоринг ключевых активов")
+    parser.add_argument("--committee", action="store_true", help="Запустить 3-агентный инвестиционный комитет")
+    parser.add_argument("--refresh",   action="store_true", help="Игнорировать кэш и обновить данные")
+    parser.add_argument("--top",       type=int, default=15, help="Количество проектов в радаре (по умолчанию: 15)")
+    parser.add_argument("--candidates",type=int, default=5,  help="Сколько сигналов рассматривает комитет (по умолчанию: 5)")
 
     args = parser.parse_args()
 
-    # If no flags passed, run both
-    if not args.radar and not args.cve:
+    if args.committee:
+        run_committee(max_candidates=args.candidates, force_refresh=args.refresh)
+    elif not args.radar and not args.cve:
         print("[Info] Запуск полного цикла (Радар + CVE Скоринг)...")
         run_emerging_radar(top_n=args.top, force_refresh=args.refresh)
         run_cve_scoring(force_refresh=args.refresh)

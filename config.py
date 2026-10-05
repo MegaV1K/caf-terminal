@@ -19,8 +19,8 @@ except ImportError:
     pass
 
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # DefiLlama Endpoints (Free, no API key required)
 DEFILLAMA_PROTOCOLS_URL = "https://api.llama.fi/protocols"

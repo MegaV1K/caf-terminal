@@ -16,6 +16,7 @@ class ReportGenerator:
         self,
         candidates: List[Dict[str, Any]],
         top_n: int = 15,
+        ai_summary: str = "",
     ) -> Path:
         """Saves emerging incubator radar candidates to Markdown & CSV."""
         timestamp_str = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -69,6 +70,14 @@ class ReportGenerator:
             md_lines.append(
                 f"| {i} | **{c.get('name')}** | `{c.get('symbol')}` | {c.get('category')} | {tvl_str} | {c7d_str} | {c1m_str} | {ratio_str} | {fees_str} | **{score}** |"
             )
+
+        if ai_summary:
+            md_lines.extend([
+                "",
+                "---",
+                "## 🤖 Аналитика от AI (LLM Agent)",
+                ai_summary,
+            ])
 
         md_lines.extend([
             "",

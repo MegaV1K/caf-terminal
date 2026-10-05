@@ -15,3 +15,7 @@ data/cache/
 reports/*.csv
 reports/*.md
 !reports/.gitkeep
+
+caf.env
+*.env
+!.env.example
