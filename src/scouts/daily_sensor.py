@@ -108,40 +108,103 @@ class DailySensor:
 
         return anomalies
 
+    def check_buy_zones(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """
+        Monitors active portfolio assets with Dry Powder to detect if current prices
+        have pulled back into designated Buy Zones.
+        """
+        from src.database.registry import CAFRegistry
+        from src.scoring.valuation import ValuationEngine
+
+        reg = CAFRegistry()
+        active = reg.get_active_portfolio()
+        if not active:
+            return []
+
+        markets = self.coingecko.fetch_markets(pages=3, force_refresh=force_refresh)
+        price_by_sym = {m["symbol"].upper(): m.get("current_price") for m in markets if m.get("symbol")}
+
+        triggers: List[Dict[str, Any]] = []
+        for a in active:
+            sym = a["symbol"].upper()
+            live_price = price_by_sym.get(sym)
+            if not live_price:
+                continue
+
+            vr = ValuationEngine.evaluate_entry(
+                symbol=sym,
+                name=a["name"],
+                tier=a["tier"],
+                cluster=a.get("cluster") or a.get("sector") or "",
+                fundamental_score=a["score"] or 70.0,
+                target_weight=a.get("target_weight") or 0.0,
+            )
+
+            # Check if asset has tactical dry powder and price reached pullback zone
+            sc = ValuationEngine.ASSET_PRICE_SCENARIOS.get(sym)
+            if vr.dry_powder_weight > 0 and sc:
+                bench_price = sc["current"]
+                pullback_pct = ((live_price - bench_price) / bench_price) * 100.0
+                if pullback_pct <= -5.0:  # Pulled back >= 5% into accumulation zone
+                    triggers.append({
+                        "symbol": sym,
+                        "name": a["name"],
+                        "current_price": live_price,
+                        "benchmark_price": bench_price,
+                        "pullback_pct": round(pullback_pct, 1),
+                        "dry_powder": vr.dry_powder_weight,
+                        "target_weight": vr.target_weight,
+                        "buy_zone": vr.buy_zones[0] if vr.buy_zones else "—",
+                        "signal": vr.entry_signal,
+                    })
+
+        return triggers
+
 
 def run_daily_sensor(force_refresh: bool = False) -> List[Dict[str, Any]]:
     """Runs daily sensor and outputs clean report with optional Telegram notification."""
-    print("\n" + "=" * 65)
-    print("⚡ ДНЕВНОЙ СЕНСОР: ЭКСПРЕСС-ПОИСК СУТОЧНЫХ АНОМАЛИЙ")
-    print("=" * 65)
+    print("\n" + "=" * 70)
+    print("⚡ ДНЕВНОЙ СЕНСОР: ЭКСПРЕСС-ПОИСК СУТОЧНЫХ АНОМАЛИЙ И ЗОН ДОБОРА")
+    print("=" * 70)
     print("Критерии: 24h TVL > +25%, аномальный оборот объёма > 0.5x, всплеск сборов")
+    print("Мониторинг портфеля: проверка входа цен в зоны добора (Buy Zones)")
     print("Затраты LLM / API Gemini: 0 (бесплатный сбор ончейн-данных)")
-    print("-" * 65)
+    print("-" * 70)
 
     sensor = DailySensor()
     anomalies = sensor.scan(force_refresh=force_refresh)
+    buy_triggers = sensor.check_buy_zones(force_refresh=force_refresh)
 
-    if not anomalies:
+    if not anomalies and not buy_triggers:
         print("[OK] Рынок в нормальном диапазоне. Экстремальных аномалий не обнаружено.")
+        print("     Цены портфельных активов находятся вне зон отложенного добора.")
         print("     (Уведомление в Telegram не отправляется, чтобы не спамить).")
-        print("=" * 65)
+        print("=" * 70)
         return []
 
-    print(f"[!] ОБНАРУЖЕНО {len(anomalies)} СУТОЧНЫХ АНОМАЛИЙ:\n")
-    print(f"{'#':<3} {'Тикер':<8} {'Проект':<20} {'Тип аномалии':<24} {'Метрика'}")
-    print("-" * 75)
+    if anomalies:
+        print(f"[!] ОБНАРУЖЕНО {len(anomalies)} СУТОЧНЫХ РЫНОЧНЫХ АНОМАЛИЙ:\n")
+        print(f"{'#':<3} {'Тикер':<8} {'Проект':<20} {'Тип аномалии':<24} {'Метрика'}")
+        print("-" * 75)
+        for i, a in enumerate(anomalies[:10], 1):
+            name_short = (a['name'][:18] + "..") if len(a['name']) > 18 else a['name']
+            print(f"{i:<3} {a['symbol']:<8} {name_short:<20} {a['reason']:<24} {a['metric_str']}")
 
-    for i, a in enumerate(anomalies[:10], 1):
-        name_short = (a['name'][:18] + "..") if len(a['name']) > 18 else a['name']
-        print(f"{i:<3} {a['symbol']:<8} {name_short:<20} {a['reason']:<24} {a['metric_str']}")
+    if buy_triggers:
+        print(f"\n🎯 СИГНАЛЫ ВХОДА В ЗОНЫ ДОБОРА (BUY ZONES — {len(buy_triggers)} АКТИВОВ):\n")
+        print(f"{'Тикер':<8} {'Проект':<18} {'Текущая':<10} {'Откат %':<10} {'Dry Powder':<12} {'Рекомендуемая зона'}")
+        print("-" * 75)
+        for bt in buy_triggers:
+            c_str = f"${bt['current_price']:.2f}" if bt['current_price'] >= 1.0 else f"${bt['current_price']:.3f}"
+            print(f"{bt['symbol']:<8} {bt['name'][:16]:<18} {c_str:<10} {bt['pullback_pct']:+.1f}%    {bt['dry_powder']:.1f}%        {bt['buy_zone']}")
 
-    print("\n" + "=" * 65)
+    print("\n" + "=" * 70)
     print("[Telegram] Отправка flash-алерта...")
     try:
         notify_daily_flash(anomalies)
         print("[OK] Flash-алерт успешно доставлен в Telegram.")
     except Exception as e:
         print(f"[!] Ошибка отправки: {e}")
-    print("=" * 65)
+    print("=" * 70)
 
     return anomalies

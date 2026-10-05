@@ -206,10 +206,10 @@ class QuarterlyRebalancer:
     """Calculates quarterly portfolio PnL, take-profit triggers, and target asset weights."""
 
     TARGET_ALLOCATION = {
-        "Core Candidate":  55.0,  # 55% of capital
-        "High Conviction": 30.0,  # 30% of capital
-        "Invest":          10.0,  # 10% of capital
-        "Watch":            5.0,  # 5% of capital (tactical/incubator)
+        "Core":            50.0,  # 50.0% of altcoin sleeve (HYPE, AAVE, TAO, AKT, RAY, JUP)
+        "High Conviction": 33.5,  # 33.5% of altcoin sleeve (SUI, TRAC, PENDLE, ONDO, GEOD, FLUID, ENA, RENDER, GRASS)
+        "Invest":           9.5,  # 9.5% of altcoin sleeve (INJ, DEEP, DRIFT, ATH, KMNO)
+        "Reserve":          7.0,  # 7.0% structural USDC liquidity buffer
     }
 
     def __init__(self):
