@@ -175,34 +175,12 @@ def run_daily_sensor(force_refresh: bool = False) -> List[Dict[str, Any]]:
     anomalies = sensor.scan(force_refresh=force_refresh)
     buy_triggers = sensor.check_buy_zones(force_refresh=force_refresh)
 
-    if not anomalies and not buy_triggers:
-        print("[OK] Рынок в нормальном диапазоне. Экстремальных аномалий не обнаружено.")
-        print("     Цены портфельных активов находятся вне зон отложенного добора.")
-        print("     (Уведомление в Telegram не отправляется, чтобы не спамить).")
-        print("=" * 70)
-        return []
-
-    if anomalies:
-        print(f"[!] ОБНАРУЖЕНО {len(anomalies)} СУТОЧНЫХ РЫНОЧНЫХ АНОМАЛИЙ:\n")
-        print(f"{'#':<3} {'Тикер':<8} {'Проект':<20} {'Тип аномалии':<24} {'Метрика'}")
-        print("-" * 75)
-        for i, a in enumerate(anomalies[:10], 1):
-            name_short = (a['name'][:18] + "..") if len(a['name']) > 18 else a['name']
-            print(f"{i:<3} {a['symbol']:<8} {name_short:<20} {a['reason']:<24} {a['metric_str']}")
-
-    if buy_triggers:
-        print(f"\n🎯 СИГНАЛЫ ВХОДА В ЗОНЫ ДОБОРА (BUY ZONES — {len(buy_triggers)} АКТИВОВ):\n")
-        print(f"{'Тикер':<8} {'Проект':<18} {'Текущая':<10} {'Откат %':<10} {'Dry Powder':<12} {'Рекомендуемая зона'}")
-        print("-" * 75)
-        for bt in buy_triggers:
-            c_str = f"${bt['current_price']:.2f}" if bt['current_price'] >= 1.0 else f"${bt['current_price']:.3f}"
-            print(f"{bt['symbol']:<8} {bt['name'][:16]:<18} {c_str:<10} {bt['pullback_pct']:+.1f}%    {bt['dry_powder']:.1f}%        {bt['buy_zone']}")
-
     print("\n" + "=" * 70)
-    print("[Telegram] Отправка flash-алерта...")
+    print("[Telegram] Отправка ежедневного отчёта...")
     try:
-        notify_daily_flash(anomalies)
-        print("[OK] Flash-алерт успешно доставлен в Telegram.")
+        from src.notifications.telegram import notify_daily_heartbeat
+        notify_daily_heartbeat(anomalies, buy_triggers)
+        print("[OK] Ежедневный отчёт успешно доставлен в Telegram.")
     except Exception as e:
         print(f"[!] Ошибка отправки: {e}")
     print("=" * 70)

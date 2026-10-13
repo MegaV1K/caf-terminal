@@ -132,6 +132,48 @@ def notify_daily_flash(anomalies: List[Dict[str, Any]]) -> None:
     notify("\n".join(lines))
 
 
+def notify_daily_heartbeat(anomalies: List[Dict[str, Any]], buy_triggers: List[Dict[str, Any]]) -> None:
+    """
+    Sends daily status report to Telegram.
+    If anomalies or buy_triggers exist -> highlights them.
+    If calm -> confirms portfolio health and status.
+    """
+    from datetime import datetime
+    lines = ["<b>⚡ CAF-Terminal | Ежедневный Утренний Отчёт</b>\n"]
+
+    if buy_triggers:
+        lines.append("🎯 <b>Вход в зоны добора (Buy Zones):</b>")
+        for bt in buy_triggers:
+            c_str = f"${bt['current_price']:.2f}" if bt['current_price'] >= 1.0 else f"${bt['current_price']:.3f}"
+            lines.append(f"  • <b>{bt['symbol']}</b> ({c_str}, откат {bt['pullback_pct']:+.1f}%): Dry Powder <b>{bt['dry_powder']:.1f}%</b> ➔ <i>{bt['buy_zone']}</i>")
+        lines.append("")
+
+    if anomalies:
+        lines.append("🚨 <b>Рыночные аномалии за 24ч:</b>")
+        for a in anomalies[:5]:
+            lines.append(f"  • <b>{a.get('name')}</b> ({a.get('symbol')}): {a.get('reason')} — <code>{a.get('metric_str')}</code>")
+        lines.append("")
+
+    if not anomalies and not buy_triggers:
+        lines.append("🟢 <b>Рыночный фон стабилен:</b>")
+        lines.append("  • Аномальных скачков TVL (&gt;25%) и объёмов не обнаружено.")
+        lines.append("  • Цены портфеля находятся вне лимитных сеток накопления.")
+
+    try:
+        from src.database.registry import CAFRegistry
+        reg = CAFRegistry()
+        p = reg.get_active_portfolio()
+        total_deployed = sum(a.get("target_weight", 0) for a in p) if p else 0.0
+        lines.append(f"\n📊 <b>Статус портфеля:</b> 20 активов в мониторинге")
+        lines.append(f"• Аллокация альтов: <b>{total_deployed:.1f}%</b> | Буфер кэша (USDC): <b>{max(0.0, round(100.0 - total_deployed, 1)):.1f}%</b>")
+    except Exception:
+        pass
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines.append(f"\n<i>Время сверки: {now_str}</i>")
+    notify("\n".join(lines))
+
+
 def notify_audit_results(audit_summary: Dict[str, Any]) -> None:
     """Sends monthly portfolio audit results to Telegram."""
     total = audit_summary.get("total_assets", 0)
