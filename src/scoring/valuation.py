@@ -267,6 +267,14 @@ class ValuationEngine:
             "bull": 0.850,
             "zones": ["$0.18–$0.21 (Starter DCA)", "$0.12–$0.18 (Value Buy)"],
         },
+        "GMX": {
+            "current": 8.26,
+            "ath": 91.07,
+            "bear": 4.50,
+            "base": 18.00,
+            "bull": 38.00,
+            "zones": ["$7.5–$8.8 (Starter DCA)", "$5.5–$7.5 (Value Accumulate)", "$3.8–$5.5 (Deep Value)"],
+        },
     }
 
     @classmethod
