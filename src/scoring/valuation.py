@@ -227,6 +227,46 @@ class ValuationEngine:
             "bull": 0.290,
             "zones": ["$0.075–$0.095 (Starter DCA)", "$0.050–$0.075 (Accumulate)"],
         },
+        "SOL": {
+            "current": 102.9,
+            "ath": 259.96,
+            "bear": 65.0,
+            "base": 180.0,
+            "bull": 320.0,
+            "zones": ["$90–$105 (Starter DCA)", "$70–$90 (Core Accumulation)", "$50–$70 (Deep Value)"],
+        },
+        "AERO": {
+            "current": 0.812,
+            "ath": 2.31,
+            "bear": 0.40,
+            "base": 1.50,
+            "bull": 2.80,
+            "zones": ["$0.75–$0.85 (Starter DCA)", "$0.55–$0.75 (Value Accumulate)", "$0.35–$0.55 (Deep Value)"],
+        },
+        "COW": {
+            "current": 0.126,
+            "ath": 2.15,
+            "bear": 0.07,
+            "base": 0.35,
+            "bull": 0.85,
+            "zones": ["$0.11–$0.13 (Starter DCA)", "$0.08–$0.11 (Value Buy)", "$0.05–$0.08 (Aggressive Buy)"],
+        },
+        "SKY": {
+            "current": 0.069,
+            "ath": 0.100,
+            "bear": 0.035,
+            "base": 0.095,
+            "bull": 0.160,
+            "zones": ["$0.060–$0.070 (Starter DCA)", "$0.045–$0.060 (Value Accumulate)"],
+        },
+        "SYRUP": {
+            "current": 0.198,
+            "ath": 0.600,
+            "bear": 0.100,
+            "base": 0.420,
+            "bull": 0.850,
+            "zones": ["$0.18–$0.21 (Starter DCA)", "$0.12–$0.18 (Value Buy)"],
+        },
     }
 
     @classmethod

@@ -121,7 +121,7 @@ class DailySensor:
         if not active:
             return []
 
-        markets = self.coingecko.fetch_markets(pages=3, force_refresh=force_refresh)
+        markets = self.coingecko.fetch_markets(pages=4, force_refresh=force_refresh)
         price_by_sym = {m["symbol"].upper(): m.get("current_price") for m in markets if m.get("symbol")}
 
         triggers: List[Dict[str, Any]] = []
