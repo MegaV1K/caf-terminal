@@ -75,6 +75,80 @@ def run_emerging_radar(top_n: int = 15, force_refresh: bool = False):
         pass
 
 
+def run_asymmetric_screening(top_n: int = 15, force_refresh: bool = False):
+    """
+    Executes the 50x–100x Asymmetric Alpha screening protocol.
+    Filters:
+    - Strict FDV ceiling <= $300M (plenty of headroom for 50x)
+    - Clean float / low unlock overhang
+    - Friction index (<= 1 Tier-1 CEX listing)
+    - High capital efficiency (Fees / TVL >= 1.5% or daily fees > $1k)
+    - Risk-managed 10% Incubator basket sizing
+    """
+    print("\n" + "=" * 70)
+    print("🚀 [ASYMMETRIC ALPHA] ПОИСК И СКРИНИНГ 50x–100x АКТИВОВ ДЛЯ ИНКУБАТОРА")
+    print("=" * 70)
+
+    from src.scoring.asymmetric_screener import AsymmetricAlphaScorer
+
+    scout = DefiLlamaScout()
+    raw_candidates = scout.get_asymmetric_50x_candidates(
+        min_tvl=500_000,
+        max_fdv=300_000_000,
+        min_daily_fees=1_000,
+    )
+
+    if not raw_candidates:
+        print("[!] Не удалось найти кандидатов по строгим фильтрам асимметрии.")
+        return
+
+    print(f"[+] Найдено {len(raw_candidates)} протоколов с FDV <= $300M и подтвержденными сборами. Расчет скоринга...")
+
+    scored = []
+    for c in raw_candidates:
+        res = AsymmetricAlphaScorer.score_candidate(c)
+        c.update(res)
+        scored.append(c)
+
+    # Sort by Asymmetric Alpha Score descending
+    scored.sort(key=lambda x: x["asymmetric_score"], reverse=True)
+
+    print("\n" + "-" * 88)
+    print(f"{'#':<3} {'Тикер':<8} {'Проект':<22} {'Score':<7} {'FDV ($)':<12} {'24h Fees':<10} {'TVL':<12} {'Вердикт':<12}")
+    print("-" * 88)
+
+    for i, c in enumerate(scored[:top_n], start=1):
+        fdv_val = c.get("metrics", {}).get("fdv", 0)
+        fdv_str = f"${fdv_val:,.0f}" if fdv_val else "—"
+        fees_val = c.get("metrics", {}).get("daily_fees", 0)
+        fees_str = f"${fees_val:,.0f}" if fees_val else "—"
+        tvl_val = c.get("metrics", {}).get("tvl", 0)
+        tvl_str = f"${tvl_val:,.0f}" if tvl_val else "—"
+        name_short = (c['name'][:20] + "..") if len(c['name']) > 20 else c['name']
+        print(f"{i:<3} {c['symbol']:<8} {name_short:<22} {c['asymmetric_score']:<7} {fdv_str:<12} {fees_str:<10} {tvl_str:<12} {c['verdict']:<12}")
+
+    # Build 10% Incubator Basket
+    basket = AsymmetricAlphaScorer.build_incubator_basket(scored, total_budget_pct=10.0, per_asset_target=2.0)
+
+    print("\n" + "=" * 70)
+    print("💼 РЕКОМЕНДУЕМАЯ КОРЗИНА ИНКУБАТОРА (РИСК-БЮДЖЕТ: 10.0% ПОРТФЕЛЯ):")
+    print(f"• Аллокация в активы: {basket['total_allocation_pct']}% | Резерв кэша инкубатора: {basket['risk_cushion_unallocated_pct']}%")
+    print("-" * 70)
+    for b in basket.get("basket", []):
+        print(f"  • {b['symbol']:<6} ({b['name']}): Вес {b['target_weight_pct']}% | Риск -{b['max_downside_pct']}% | Выплата при 50x: +{b['upside_50x_pct']}% к портфелю")
+
+    model = basket.get("mathematical_model", {})
+    if model:
+        print(f"\n📊 Математическая асимметрия (1 попадание при 4 банкротствах): {model.get('payout_scenario_1_hit_50x')}")
+
+    # Generate Report
+    reporter = ReportGenerator()
+    report_file = reporter.generate_asymmetric_report(scored, basket, top_n=top_n)
+    print("\n" + "=" * 70)
+    print(f"[OK] Отчет сохранен: {report_file}")
+    print("=" * 70)
+
+
 def run_cve_scoring(tokens_list: list = None, force_refresh: bool = False):
     """Scores key tokens from the CVE portfolio / conversation."""
     print("\n" + "=" * 60)
@@ -402,6 +476,8 @@ def main():
     parser.add_argument("--quarterly",  action="store_true", help="Алиас для --rebalance")
 
     # Core components
+    parser.add_argument("--asymmetric", action="store_true", help="[Alpha] Поиск и скоринг 50x–100x асимметричных активов")
+    parser.add_argument("--alpha",      action="store_true", help="Алиас для --asymmetric")
     parser.add_argument("--radar",      action="store_true", help="Запустить поиск Emerging/Incubator проектов")
     parser.add_argument("--cve",        action="store_true", help="Запустить CVE скоринг ключевых активов")
     parser.add_argument("--committee",  action="store_true", help="Запустить 3-агентный инвестиционный комитет")
@@ -455,7 +531,9 @@ def main():
         return
 
     # 3. Individual views & runs
-    if args.pnl:
+    if args.asymmetric or args.alpha:
+        run_asymmetric_screening(top_n=args.top, force_refresh=args.refresh)
+    elif args.pnl:
         run_pnl_view()
     elif args.registry:
         run_registry_view()

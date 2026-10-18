@@ -167,3 +167,87 @@ class DefiLlamaScout:
         # Sort by 7-day TVL growth descending
         candidates.sort(key=lambda x: (x["change_7d"] or 0), reverse=True)
         return candidates
+
+    def get_asymmetric_50x_candidates(
+        self,
+        min_tvl: float = 500_000,
+        max_fdv: float = 300_000_000,
+        min_daily_fees: float = 1_000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Filters candidates specifically for the 50x–100x Asymmetric Alpha engine:
+        - Strict FDV ceiling <= $300M (plenty of valuation headroom)
+        - Active TVL >= $500k (avoids pure ghost pools)
+        - Confirmed fee generation or high capital efficiency (Fees / TVL >= 1.5%)
+        """
+        protocols = self.fetch_protocols()
+        fees_data = self.fetch_fees_and_revenue()
+
+        fees_by_id: Dict[str, Any] = {}
+        fees_by_name: Dict[str, Any] = {}
+        for p in fees_data.get("protocols", []):
+            did = p.get("defillamaId")
+            if did:
+                fees_by_id[str(did)] = p
+            name_lc = (p.get("name") or "").lower()
+            if name_lc:
+                fees_by_name[name_lc] = p
+            if p.get("module"):
+                fees_by_name[p["module"].lower()] = p
+
+        candidates = []
+        for p in protocols:
+            tvl = float(p.get("tvl") or 0)
+            mcap = float(p.get("mcap") or 0)
+            fdv = float(p.get("fdv") or mcap or 0)
+
+            if tvl < min_tvl:
+                continue
+
+            # Strict FDV ceiling check ($300M max)
+            eff_fdv = fdv if fdv > 0 else mcap
+            if eff_fdv > max_fdv:
+                continue
+            if eff_fdv == 0 and tvl > 40_000_000:
+                continue
+
+            # Resolve fees
+            proto_id = str(p.get("id") or "")
+            name_lower = (p.get("name") or "").lower()
+            fee_info = (
+                fees_by_id.get(proto_id)
+                or fees_by_name.get(name_lower)
+                or {}
+            )
+
+            daily_fees = float(fee_info.get("total24h") or 0)
+            daily_revenue = float(fee_info.get("totalRevenue24h") or 0)
+            annual_fees = daily_fees * 365
+            fee_tvl_ratio = (annual_fees / tvl) if tvl > 0 else 0.0
+
+            # Must have either minimum daily fees ($1k+) OR Fee/TVL >= 1.5%
+            if daily_fees < min_daily_fees and fee_tvl_ratio < 0.015:
+                continue
+
+            candidates.append({
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "symbol": (p.get("symbol") or "").upper(),
+                "category": p.get("category", "Uncategorized"),
+                "chains": p.get("chains", []),
+                "tvl": tvl,
+                "change_1d": round(p.get("change_1d") or 0, 2),
+                "change_7d": round(p.get("change_7d") or 0, 2),
+                "change_1m": round(p.get("change_1m") or 0, 2),
+                "mcap": mcap if mcap > 0 else None,
+                "fdv": eff_fdv if eff_fdv > 0 else None,
+                "daily_fees": daily_fees,
+                "daily_revenue": daily_revenue,
+                "fee_to_tvl_ratio": round(fee_tvl_ratio, 4),
+                "url": p.get("url"),
+                "gecko_id": p.get("gecko_id"),
+            })
+
+        # Sort by daily fees descending
+        candidates.sort(key=lambda x: x.get("daily_fees", 0), reverse=True)
+        return candidates

@@ -123,3 +123,70 @@ class ReportGenerator:
             f.write("\n".join(md_lines))
 
         return md_path
+
+    def generate_asymmetric_report(
+        self,
+        scored_candidates: List[Dict[str, Any]],
+        basket_result: Dict[str, Any],
+        top_n: int = 15,
+    ) -> Path:
+        """Saves Asymmetric 50x Alpha screening report to Markdown."""
+        timestamp_str = datetime.now().strftime("%Y-%m-%d_%H%M")
+        date_display = datetime.now().strftime("%Y-%m-%d %H:%M")
+        md_path = self.output_dir / f"asymmetric_50x_radar_{timestamp_str}.md"
+
+        md_lines = [
+            "# 🚀 CAF-Terminal: Asymmetric 50x–100x Alpha Screener",
+            f"**Дата отчёта:** {date_display}  ",
+            "**Эмпирический базис:** Архитектура SOL, TAO, HYPE, KAS, PENDLE, RUNE, INJ до фазы консенсуса.",
+            "**Ключевые критерии:** FDV <= $300M, Float >= 60%, Friction Index (<= 1 Tier-1 CEX), Fees/TVL >= 1.5%.",
+            "",
+            "## 🎯 Топ кандидатов по шкале Asymmetric Alpha",
+            "| # | Проект | Тикер | Alpha Score | Классификация | FDV ($) | Float | 24h Fees | TVL | Вердикт |",
+            "|---|---|---|---|---|---|---|---|---|---|",
+        ]
+
+        for i, c in enumerate(scored_candidates[:top_n], start=1):
+            fdv_val = c.get("metrics", {}).get("fdv", 0)
+            fdv_str = f"${fdv_val:,.0f}" if fdv_val else "—"
+            fl_val = c.get("metrics", {}).get("float_ratio")
+            fl_str = f"{fl_val * 100:.0f}%" if fl_val is not None else "Fair/DEX"
+            fees_val = c.get("metrics", {}).get("daily_fees", 0)
+            fees_str = f"${fees_val:,.0f}" if fees_val else "—"
+            tvl_val = c.get("metrics", {}).get("tvl", 0)
+            tvl_str = f"${tvl_val:,.0f}" if tvl_val else "—"
+
+            md_lines.append(
+                f"| {i} | **{c.get('name')}** | `{c.get('symbol')}` | **{c.get('asymmetric_score')}** | {c.get('classification')} | {fdv_str} | {fl_str} | {fees_str} | {tvl_str} | `{c.get('verdict')}` |"
+            )
+
+        md_lines.extend([
+            "",
+            "---",
+            "## 💼 Рекомендуемая корзина инкубатора (Лимит риска: 10.0%)",
+            f"**Совокупная аллокация:** {basket_result.get('total_allocation_pct', 0)}%  ",
+            f"**Буфер кэша инкубатора:** {basket_result.get('risk_cushion_unallocated_pct', 0)}%  ",
+            "",
+            "| Тикер | Проект | Score | Вес в портфеле (%) | Макс. убыток (%) | Выплата при 50x (%) |",
+            "|---|---|---|---|---|---|",
+        ])
+
+        for b in basket_result.get("basket", []):
+            md_lines.append(
+                f"| `{b.get('symbol')}` | **{b.get('name')}** | {b.get('score')} | **{b.get('target_weight_pct')}%** | -{b.get('max_downside_pct')}% | **+{b.get('upside_50x_pct')}%** |"
+            )
+
+        model = basket_result.get("mathematical_model", {})
+        if model:
+            md_lines.extend([
+                "",
+                "### Математическая асимметрия корзины:",
+                f"- **Худший сценарий (все позиции в ноль):** {model.get('base_downside_max')}",
+                f"- **Сценарий 1 попадания в 50x (4 в ноль):** {model.get('payout_scenario_1_hit_50x')}",
+                f"- **Сценарий 1 попадания в 20x (4 в ноль):** {model.get('payout_scenario_1_hit_20x')}",
+            ])
+
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(md_lines))
+
+        return md_path

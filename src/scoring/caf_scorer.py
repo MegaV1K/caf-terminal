@@ -273,3 +273,30 @@ class CAFScorer:
                 score += 5
 
         return round(min(100.0, score), 1)
+
+    @classmethod
+    def score_asymmetric_50x(
+        cls,
+        data: Dict[str, Any],
+        github_metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Evaluates an asset against the 5 Empirical Asymmetric 50x-100x Criteria."""
+        from src.scoring.asymmetric_screener import AsymmetricAlphaScorer
+        return AsymmetricAlphaScorer.score_candidate(data, github_metrics=github_metrics)
+
+    @classmethod
+    def build_incubator_basket(
+        cls,
+        candidates: List[Dict[str, Any]],
+        total_budget_pct: float = 10.0,
+        per_asset_target: float = 2.0,
+        max_assets: int = 5,
+    ) -> Dict[str, Any]:
+        """Builds an asymmetric incubator basket with risk-managed 10% total allocation."""
+        from src.scoring.asymmetric_screener import AsymmetricAlphaScorer
+        return AsymmetricAlphaScorer.build_incubator_basket(
+            candidates,
+            total_budget_pct=total_budget_pct,
+            per_asset_target=per_asset_target,
+            max_assets=max_assets,
+        )
