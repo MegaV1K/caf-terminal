@@ -220,14 +220,15 @@ def run_cve_scoring(tokens_list: list = None, force_refresh: bool = False):
 
 
 def run_committee(max_candidates: int = 5, force_refresh: bool = False):
-    """Runs the 3-agent Investment Committee monthly scan."""
+    """Runs the 4-agent Investment Committee monthly scan (Orchestrator → Analyst → Skeptic → CFO)."""
     from src.ai.committee import InvestmentCommittee
     from src.reports.committee_report import CommitteeReportGenerator
+    from src.database.registry import CAFRegistry
 
     print("\n" + "=" * 60)
-    print("[COMMITTEE] ИНВЕСТИЦИОННЫЙ КОМИТЕТ: ЕЖЕМЕСЯЧНЫЙ СКАН")
+    print("[COMMITTEE] ИНВЕСТИЦИОННЫЙ КОМИТЕТ: ЕЖЕМЕСЯЧНЫЙ СКАН (4-AGENT)")
     print("=" * 60)
-    print("Агенты: Analyst (тезис) | Skeptic (критика) | CFO (решение)")
+    print("Агенты: Orchestrator (бриф/риск) | Analyst (тезис) | Skeptic (критика) | CFO (решение)")
     print(f"Кандидатов на рассмотрение: топ-{max_candidates} по силе сигнала")
     print("=" * 60)
 
@@ -265,10 +266,12 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
     volume_anomalies = cg.get_volume_anomalies(markets=cg_markets)
     trending_coins = cg.fetch_trending(force_refresh=force_refresh)
 
-    # 3. Setup GitHub developer activity scout
-    print("[3/3] Подключение анализа активности разработчиков (GitHub)...")
+    # 3. Setup GitHub developer activity scout & Portfolio Cluster Exposure
+    print("[3/3] Подключение анализа активности разработчиков (GitHub) и кластеров...")
     from src.scouts.github import GitHubScout
     github_scout = GitHubScout()
+    reg = CAFRegistry()
+    clusters = reg.get_cluster_exposure()
 
     # Run committee
     committee = InvestmentCommittee()
@@ -278,6 +281,7 @@ def run_committee(max_candidates: int = 5, force_refresh: bool = False):
         trending_coins=trending_coins,
         github_scout=github_scout,
         max_candidates=max_candidates,
+        cluster_exposure=clusters,
     )
 
     if not reports:

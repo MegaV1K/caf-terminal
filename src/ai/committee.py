@@ -1,21 +1,16 @@
 """
 Multi-Agent Investment Committee for CAF-Terminal.
 
-Architecture:
-  SignalDetector → detects strong signals from data sources
-  AnalystAgent   → builds investment thesis for a candidate
-  SkepticAgent   → systematically attacks that thesis
-  CFOAgent       → hears both sides and makes the final call (JSON output)
+Architecture (4-Agent Orchestrated Deliberation):
+  SignalDetector       → detects strong signals from data sources
+  CommitteeOrchestrator→ sets strategic brief, cluster risk bounds, and targeted questions
+  AnalystAgent         → builds investment thesis for a candidate
+  SkepticAgent         → systematically attacks that thesis based on orchestrator's focus
+  CFOAgent             → hears all sides, evaluates portfolio fit and makes the final call (JSON output)
 
 Decision flow:
-  SignalDetector fires → Analyst drafts thesis → Skeptic tears it apart
-  → CFO renders verdict: INCUBATOR | FULL_CAF | PASS
-
-v2 Improvements:
-  - Fixed MCap filter: protocols with mcap=0 are now filtered by TVL proxy ($50M cap)
-  - CFO uses structured JSON output instead of regex parsing
-  - Migrated to google.genai SDK (no more FutureWarning)
-  - Model cascade via shared gemini_client module
+  SignalDetector fires → Orchestrator briefs committee → Analyst drafts thesis
+  → Skeptic tears it apart → CFO renders verdict: INCUBATOR | FULL_CAF | PASS
 """
 
 import json
@@ -58,13 +53,14 @@ class Signal:
 
 @dataclass
 class CommitteeReport:
-    """Full deliberation output from the 3-agent committee."""
+    """Full deliberation output from the 4-agent committee."""
     signal: Signal
     analyst_thesis: str
     skeptic_critique: str
     cfo_reasoning: str
     verdict: Verdict
     conviction_score: float   # 0-100, CFO's confidence in the verdict
+    orchestrator_brief: str = ""
     follow_up_actions: List[str] = field(default_factory=list)
 
 
@@ -298,13 +294,56 @@ def _format_signal(s: Signal) -> str:
     )
 
 
+# ── Orchestrator Agent ────────────────────────────────────────────────────────
+
+class CommitteeOrchestrator:
+    """
+    Role: Strategic director & session moderator of the Investment Committee.
+    Responsibilities:
+    - Pre-screens the incoming signal against portfolio cluster risk limits.
+    - Defines the primary thesis angle for AnalystAgent.
+    - Identifies the sharpest kill-switch questions for SkepticAgent.
+    - Provides a structured briefing to prevent circular debates.
+    """
+
+    SYSTEM_PROMPT = """Ты — Председатель и Главный Оркестратор Инвестиционного Комитета криптофонда.
+Твоя задача: перед началом дебатов провести стратегический брифинг для Аналитика и Скептика.
+
+Структура брифинга (строго 4 пункта):
+1. **СТРАТЕГИЧЕСКИЙ ФОКУС:** Главный нарратив и почему сигнал важен (или подозрителен).
+2. **ЗАДАНИЕ АНАЛИТИКУ:** На какой именно точке ценности (Value Capture, ров, органика) сосредоточить тезис.
+3. **ЗАДАНИЕ СКЕПТИКУ:** Какой конкретный критический риск (накрутка объёма, дефолт пула, разлоки, невозврат кредитов) разгромить в первую очередь.
+4. **ЛИМИТ КЛАСТЕРА / ПОРТФЕЛЬНЫЙ КОНТЕКСТ:** Как проект сочетается с текущей экспозицией портфеля.
+
+Будь кратким, директивным и предельно профессиональным. На русском языке."""
+
+    def prepare_brief(
+        self,
+        signal: Signal,
+        cluster_exposure: Optional[Dict[str, float]] = None,
+    ) -> str:
+        cluster_info = ""
+        if cluster_exposure:
+            cluster_info = "\nТекущая экспозиция портфеля по кластерам:\n" + "\n".join(
+                f"- {k}: {v:.1f}%" for k, v in cluster_exposure.items()
+            )
+
+        prompt = (
+            f"Проведи оркестрационный брифинг для рассмотрения кандидата:\n\n"
+            f"{_format_signal(signal)}\n"
+            f"{cluster_info}\n\n"
+            f"Сформируй директивный бриф для заседания Комитета."
+        )
+        return generate(prompt, system_instruction=self.SYSTEM_PROMPT)
+
+
 # ── Analyst Agent ──────────────────────────────────────────────────────────────
 
 class AnalystAgent:
     """Role: builds an investment thesis. Asks: 'Why SHOULD we look at this?'"""
 
     SYSTEM_PROMPT = """Ты — криптовалютный аналитик с опытом работы в венчурном фонде.
-Твоя задача: для каждого проекта сформулировать ИНВЕСТИЦИОННЫЙ ТЕЗИС по методологии CAF/CVE.
+Твоя задача: для каждого проекта сформулировать ИНВЕСТИЦИОННЫЙ ТЕЗИС по методологии CAF/CVE, опираясь на бриф Оркестратора.
 Структура ответа всегда строго такая:
 
 **ТЕЗИС:** Одно предложение — почему этот проект заслуживает внимания.
@@ -314,13 +353,20 @@ class AnalystAgent:
 - Value Capture: как токен захватывает ценность (buyback, fees, governance)?
 - Momentum: что говорят данные (TVL, fees, пользователи)?
 
+**ОТВЕТ НА ФОКУС ОРКЕСТРАТОРА:**
+- Прямой разбор вопроса, поставленного Председателем Комитета.
+
 **КЛЮЧЕВЫЕ ВОПРОСЫ ДЛЯ ГЛУБОКОГО АНАЛИЗА:**
 - 3 вопроса, которые НУЖНО проверить перед входом.
 
 Лаконично, конкретно, только факты и логика. Без воды. На русском языке."""
 
-    def build_thesis(self, signal: Signal) -> str:
-        prompt = f"Построй инвестиционный тезис для следующего проекта:\n\n{_format_signal(signal)}"
+    def build_thesis(self, signal: Signal, orchestrator_brief: str = "") -> str:
+        prompt = (
+            f"БРИФ ОРКЕСТРАТОРА:\n{orchestrator_brief}\n\n"
+            f"ДАННЫЕ ПРОЕКТА:\n{_format_signal(signal)}\n\n"
+            f"Построй инвестиционный тезис с учётом брифа Оркестратора."
+        )
         return generate(prompt, system_instruction=self.SYSTEM_PROMPT)
 
 
@@ -330,12 +376,15 @@ class SkepticAgent:
     """Role: systematically attacks the analyst's thesis. Asks: 'Why SHOULDN'T we touch this?'"""
 
     SYSTEM_PROMPT = """Ты — жёсткий риск-менеджер и скептик криптовалютных инвестиций.
-Твоя задача: разобрать инвестиционный тезис аналитика и найти всё, что могло пойти не так.
+Твоя задача: разобрать инвестиционный тезис аналитика и уничтожить его слабые места, следуя фокусу риска от Оркестратора.
 Ты НЕ должен быть вежливым. Ты должен быть честным.
 
 Структура ответа всегда такая:
 
 **КОНТРТЕЗИС:** Одно предложение — главная причина НЕ инвестировать.
+
+**АТАКА ПО ЗАДАНИЮ ОРКЕСТРАТОРА:**
+- Жесткий аудит указанного Оркестратором критического риска.
 
 **РИСКИ И СЛАБЫЕ МЕСТА:**
 - Value Capture риск: действительно ли токен захватывает ценность, или это иллюзия?
@@ -350,12 +399,13 @@ class SkepticAgent:
 
 Только конкретика. Ни слова лести. На русском языке."""
 
-    def critique(self, signal: Signal, analyst_thesis: str) -> str:
+    def critique(self, signal: Signal, analyst_thesis: str, orchestrator_brief: str = "") -> str:
         prompt = (
-            f"Тезис аналитика по проекту {signal.name} ({signal.symbol}):\n\n"
+            f"БРИФ ОРКЕСТРАТОРА:\n{orchestrator_brief}\n\n"
+            f"ТЕЗИС АНАЛИТИКА по проекту {signal.name} ({signal.symbol}):\n\n"
             f"{analyst_thesis}\n\n"
             f"Данные проекта:\n{_format_signal(signal)}\n\n"
-            "Разбери этот тезис. Найди всё слабое. Не жалей."
+            "Разбери этот тезис. Нанеси сокрушительный удар по уязвимым местам."
         )
         return generate(prompt, system_instruction=self.SYSTEM_PROMPT)
 
@@ -364,12 +414,12 @@ class SkepticAgent:
 
 class CFOAgent:
     """
-    Role: hears analyst + skeptic, makes the final capital allocation decision.
+    Role: hears orchestrator brief, analyst + skeptic, makes final capital allocation decision.
     v2: Uses structured JSON output for reliable verdict parsing.
     """
 
     SYSTEM_PROMPT = """Ты — финансовый директор крипто-инвестиционного фонда.
-Ты только что выслушал аналитика (тезис) и скептика (критику) по одному проекту.
+Ты только что выслушал бриф Оркестратора, тезис Аналитика и критику Скептика по одному проекту.
 Твоя задача: принять ОКОНЧАТЕЛЬНОЕ РЕШЕНИЕ по методологии CAF.
 
 Три возможных решения:
@@ -387,9 +437,16 @@ class CFOAgent:
 
 Будь решительным. На русском языке."""
 
-    def decide(self, signal: Signal, analyst_thesis: str, skeptic_critique: str) -> CommitteeReport:
+    def decide(
+        self,
+        signal: Signal,
+        analyst_thesis: str,
+        skeptic_critique: str,
+        orchestrator_brief: str = "",
+    ) -> CommitteeReport:
         prompt = (
             f"ПРОЕКТ: {signal.name} ({signal.symbol})\n\n"
+            f"=== БРИФ ОРКЕСТРАТОРА ===\n{orchestrator_brief}\n\n"
             f"=== ТЕЗИС АНАЛИТИКА ===\n{analyst_thesis}\n\n"
             f"=== КРИТИКА СКЕПТИКА ===\n{skeptic_critique}\n\n"
             f"=== ДАННЫЕ ===\n{_format_signal(signal)}\n\n"
@@ -425,6 +482,7 @@ class CFOAgent:
             cfo_reasoning=reasoning,
             verdict=verdict,
             conviction_score=conviction,
+            orchestrator_brief=orchestrator_brief,
             follow_up_actions=next_steps,
         )
 
@@ -432,27 +490,35 @@ class CFOAgent:
 # ── Investment Committee ────────────────────────────────────────────────────────
 
 class InvestmentCommittee:
-    """Orchestrates the 3-agent deliberation for a single signal."""
+    """Orchestrates the 4-agent deliberation for a single signal."""
 
     def __init__(self):
-        self.analyst = AnalystAgent()
-        self.skeptic = SkepticAgent()
-        self.cfo     = CFOAgent()
+        self.orchestrator = CommitteeOrchestrator()
+        self.analyst      = AnalystAgent()
+        self.skeptic      = SkepticAgent()
+        self.cfo          = CFOAgent()
 
-    def deliberate(self, signal: Signal) -> CommitteeReport:
+    def deliberate(
+        self,
+        signal: Signal,
+        cluster_exposure: Optional[Dict[str, float]] = None,
+    ) -> CommitteeReport:
         print(f"\n{'─'*60}")
         print(f"[COMMITTEE] Рассматривается: {signal.name} ({signal.symbol})")
         print(f"  Сигнал: {signal.signal_type} | Сила: {signal.signal_strength}/100")
         print(f"{'─'*60}")
 
-        print("[ANALYST]  Формирую тезис...")
-        thesis = self.analyst.build_thesis(signal)
+        print("[ORCHESTRATOR] Формирую стратегический бриф и границы риска...")
+        brief = self.orchestrator.prepare_brief(signal, cluster_exposure=cluster_exposure)
 
-        print("[SKEPTIC]  Атакую тезис...")
-        critique = self.skeptic.critique(signal, thesis)
+        print("[ANALYST]      Формирую тезис по брифу...")
+        thesis = self.analyst.build_thesis(signal, orchestrator_brief=brief)
 
-        print("[CFO]      Принимаю решение (JSON)...")
-        report = self.cfo.decide(signal, thesis, critique)
+        print("[SKEPTIC]      Атакую тезис по заданию Оркестратора...")
+        critique = self.skeptic.critique(signal, thesis, orchestrator_brief=brief)
+
+        print("[CFO]          Принимаю финальное решение (JSON)...")
+        report = self.cfo.decide(signal, thesis, critique, orchestrator_brief=brief)
 
         verdict_display = {
             Verdict.FULL_CAF:  "[!!!] FULL CAF - СРОЧНЫЙ АНАЛИЗ",
@@ -470,6 +536,7 @@ class InvestmentCommittee:
         trending_coins: Optional[List[Dict[str, Any]]] = None,
         github_scout: Optional[Any] = None,
         max_candidates: int = 5,
+        cluster_exposure: Optional[Dict[str, float]] = None,
     ) -> List[CommitteeReport]:
         """
         Monthly radar run across multi-source signals.
@@ -477,7 +544,7 @@ class InvestmentCommittee:
         Returns committee reports sorted by verdict priority (FULL_CAF first).
         """
         print("\n" + "="*60)
-        print("[COMMITTEE] ЕЖЕМЕСЯЧНЫЙ СКАН: ПОИСК СИГНАЛОВ")
+        print("[COMMITTEE] ЕЖЕМЕСЯЧНЫЙ СКАН: ПОИСК СИГНАЛОВ (4-AGENT COMMITTEE)")
         print("="*60)
 
         detector = SignalDetector()
@@ -498,7 +565,7 @@ class InvestmentCommittee:
 
         reports: List[CommitteeReport] = []
         for s in top_signals:
-            report = self.deliberate(s)
+            report = self.deliberate(s, cluster_exposure=cluster_exposure)
             reports.append(report)
 
         # Sort: FULL_CAF first, then INCUBATOR, then PASS

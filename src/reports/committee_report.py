@@ -27,7 +27,7 @@ class CommitteeReportGenerator:
         lines = [
             "# CAF Investment Committee Report",
             f"**Дата:** {date_display}  ",
-            f"**Методология:** 3-агентный комитет (Analyst → Skeptic → CFO)  ",
+            f"**Методология:** 4-агентный комитет (Orchestrator → Analyst → Skeptic → CFO)  ",
             f"**Рассмотрено сигналов:** {len(reports)}",
             "",
         ]
@@ -64,6 +64,9 @@ class CommitteeReportGenerator:
                 f"**MCap:** {'${:,.0f}'.format(s.mcap) if s.mcap else 'N/A'} | "
                 f"**Turnover (Vol/MCap):** {f'{s.vol_mcap_ratio:.2f}x' if s.vol_mcap_ratio else 'N/A'} | "
                 f"**GitHub Dev Health:** {f'{s.dev_score:.0f}/100 ({s.commits_30d or 0} commits 30d)' if s.dev_score is not None else 'N/A'}  ",
+                "",
+                "### Стратегический бриф Оркестратора",
+                r.orchestrator_brief or "—",
                 "",
                 "### Тезис аналитика",
                 r.analyst_thesis,
