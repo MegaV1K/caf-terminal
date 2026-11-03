@@ -415,6 +415,10 @@ class CAFRegistry:
             ("SEI", "Sei Network", "Parallelized EVM L1", "Other L1", "Watch", "Параллелизованный EVM первого уровня с высокой скоростью финализации", "Необходимость формирования устойчивого DeFi ландшафта", 68.5, 0.0),
             ("TIA", "Celestia", "Modular DA Layer", "Modular Infra", "Watch", "Пионер модульной архитектуры и доступности данных (Data Availability)", "Крупные разблокировки токенов для ранних фондов", 67.0, 0.0),
             ("W", "Wormhole", "Cross-chain Messaging Infra", "Cross-chain Infra", "Watch", "Инфраструктурный стандарт кроссчейн-коммуникации и передачи сообщений", "Низкий захват ценности токеном при высоком FDV", 65.0, 0.0),
+            ("ZK", "zkSync", "ZK-Rollup Layer 2", "Ethereum DeFi / Lending", "Watch", "Флагманский ZK-rollup от Matter Labs ($458M VC), сильная криптографическая база и ZK-Stack", "Токеномика: 40% инсайдерам, огромный FDV, токен не используется для газа (EVC = 0)", 64.0, 0.0),
+            ("ARB", "Arbitrum", "Optimistic Rollup Layer 2", "Ethereum DeFi / Lending", "Watch", "Лидер L2 по TVL ($3B+) и сборам, развитая экосистема Stylus и Orbit", "Токен чисто управленческий (газ в ETH), долгосрочный навес разблокировок DAO/инвесторов", 72.0, 0.0),
+            ("ICP", "Internet Computer", "Onchain Cloud / Sovereign L1", "Other L1", "Watch", "Амбициозное децентрализованное облако от DFINITY Foundation, прямой utility через сжигание cycles", "Умеренный розничный adoption, сильная зависимость от привлечения энтерпрайз-разработчиков", 66.0, 0.0),
+            ("XCH", "Chia Network", "Proof-of-Space-and-Time L1", "Other L1", "Watch", "Зелёный консенсус Брэма Коэна (BitTorrent), фокус на RWA и институциональные карбоновые рынки", "Корпоративный pre-farm под контролем юрлица Chia Network Inc., слабый розничный DeFi-спрос", 55.0, 0.0),
         ]
 
         count = 0

@@ -173,6 +173,11 @@ class CAFScorer:
         if rank > 400:
             fragility_penalty += 15.0
 
+        # Corporate pre-farm penalty (e.g. XCH, XRP where a US corp holds the majority of treasury/pre-farm)
+        is_corporate_prefarm = metrics.get("is_corporate_prefarm", False) or symbol_upper in ("XCH", "XRP")
+        if is_corporate_prefarm:
+            fragility_penalty += 20.0  # Investor is not a shareholder of the operating company
+
         safety_score = max(10.0, 85.0 - fragility_penalty)
 
         # Allow manual overrides from expert review

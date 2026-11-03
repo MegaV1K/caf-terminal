@@ -480,6 +480,8 @@ def main():
     parser.add_argument("--quarterly",  action="store_true", help="Алиас для --rebalance")
 
     # Core components
+    parser.add_argument("--deep-dive",  type=str, default="", help="[Dossier] Глубокий 10-пунктовый институциональный аудит токена")
+    parser.add_argument("--dossier",    type=str, default="", help="Алиас для --deep-dive")
     parser.add_argument("--asymmetric", action="store_true", help="[Alpha] Поиск и скоринг 50x–100x асимметричных активов")
     parser.add_argument("--alpha",      action="store_true", help="Алиас для --asymmetric")
     parser.add_argument("--radar",      action="store_true", help="Запустить поиск Emerging/Incubator проектов")
@@ -535,7 +537,12 @@ def main():
         return
 
     # 3. Individual views & runs
-    if args.asymmetric or args.alpha:
+    target_ticker = args.deep_dive or args.dossier
+    if target_ticker:
+        from src.reports.deep_dive import DeepDiveEngine
+        engine = DeepDiveEngine()
+        engine.generate_dossier(target_ticker, force_refresh=args.refresh)
+    elif args.asymmetric or args.alpha:
         run_asymmetric_screening(top_n=args.top, force_refresh=args.refresh)
     elif args.pnl:
         run_pnl_view()
