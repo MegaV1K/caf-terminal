@@ -524,6 +524,43 @@ def run_deribit_analysis(currency: str = "ETH", force_refresh: bool = False):
     print("=" * 85)
 
 
+def run_daemon_loop(interval_sec: int = 3600):
+    """Continuous automated monitor for market anomalies, options pinning, and portfolio risk."""
+    import time
+    from datetime import datetime
+    print("\n" + "=" * 70)
+    print(f"🤖 [DAEMON] ЗАПУСК АВТОНОМНОГО МОНИТОРИНГА CAF-TERMINAL (ИНТЕРВАЛ: {interval_sec}c)")
+    print("=" * 70)
+    print("Включает: Daily Anomaly Sensor + Deribit Pinning Radar + Institutional Risk Audit")
+    print("Для остановки нажмите Ctrl+C")
+    print("-" * 70)
+
+    from src.scouts.daily_sensor import run_daily_sensor
+    from src.risk.risk_manager import InstitutionalRiskManager
+
+    risk_mgr = InstitutionalRiskManager()
+    cycle = 1
+
+    try:
+        while True:
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[DAEMON CYCLE #{cycle}] Сверка данных: {now_str}")
+
+            # 1. Daily sensor (anomalies + buy zones + deribit options pinning)
+            run_daily_sensor(force_refresh=True)
+
+            # 2. Portfolio risk check (cluster limits & tilt locks)
+            risk_summary = risk_mgr.audit_portfolio_risk()
+            status_emoji = "✅" if risk_summary["is_healthy"] else "⚠️"
+            print(f"[Risk Status] {status_emoji} Портфель: {len(risk_summary['cluster_breaches'])} кластерных превышений, {len(risk_summary['tilt_locks'])} тильт-блокировок.")
+
+            print(f"[DAEMON] Цикл #{cycle} завершён. Следующая сверка через {interval_sec // 60} мин ({interval_sec} сек)...")
+            cycle += 1
+            time.sleep(interval_sec)
+    except KeyboardInterrupt:
+        print("\n[DAEMON] Мониторинг остановлен пользователем.")
+
+
 def run_weekly_cycle(top_n: int = 20, candidates: int = 5, force_refresh: bool = False):
     """Executes the complete weekly investment cycle: Radar Top 20 + Committee."""
     print("\n" + "=" * 70)
@@ -553,6 +590,8 @@ def main():
     parser.add_argument("--deribit",    action="store_true", help="[Deribit] Онлайн-анализ опционов, открытого интереса и pinning-уровней")
     parser.add_argument("--options",    action="store_true", help="Алиас для --deribit")
     parser.add_argument("--currency",   type=str, default="ETH", help="Базовая валюта для Deribit (ETH или BTC, по умолчанию: ETH)")
+    parser.add_argument("--daemon",     action="store_true", help="[Daemon] Непрерывный автономный цикл мониторинга опционов и рисков")
+    parser.add_argument("--interval",   type=int, default=3600, help="Интервал автономной сверки в секундах (по умолчанию: 3600 = 1 час)")
 
     # Core components
     parser.add_argument("--deep-dive",  type=str, default="", help="[Dossier] Глубокий 10-пунктовый институциональный аудит токена")
@@ -623,6 +662,8 @@ def main():
         run_risk_audit()
     elif args.deribit or args.options:
         run_deribit_analysis(currency=args.currency, force_refresh=args.refresh)
+    elif args.daemon:
+        run_daemon_loop(interval_sec=args.interval)
     elif args.pnl:
         run_pnl_view()
     elif args.registry:

@@ -132,14 +132,25 @@ def notify_daily_flash(anomalies: List[Dict[str, Any]]) -> None:
     notify("\n".join(lines))
 
 
-def notify_daily_heartbeat(anomalies: List[Dict[str, Any]], buy_triggers: List[Dict[str, Any]]) -> None:
+def notify_daily_heartbeat(
+    anomalies: List[Dict[str, Any]],
+    buy_triggers: List[Dict[str, Any]],
+    options_alerts: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     """
     Sends daily status report to Telegram.
-    If anomalies or buy_triggers exist -> highlights them.
+    If anomalies, buy_triggers, or options_alerts exist -> highlights them.
     If calm -> confirms portfolio health and status.
     """
     from datetime import datetime
     lines = ["<b>⚡ CAF-Terminal | Ежедневный Утренний Отчёт</b>\n"]
+
+    if options_alerts:
+        lines.append("📈 <b>Опционные уровни Pinning (Deribit):</b>")
+        for oa in options_alerts[:4]:
+            lines.append(f"  • <b>{oa['asset']}</b> (${oa['spot_price']:,.0f}): в {oa['distance_pct']:.1f}% от <code>{oa['instrument']}</code> (${oa['pinning_level']:,.0f})")
+            lines.append(f"    ➔ <i>{oa['reaction']}</i>")
+        lines.append("")
 
     if buy_triggers:
         lines.append("🎯 <b>Вход в зоны добора (Buy Zones):</b>")

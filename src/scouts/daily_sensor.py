@@ -160,6 +160,51 @@ class DailySensor:
 
         return triggers
 
+    def check_options_pinning(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """
+        Monitors live Deribit options markets for ETH and BTC to detect if current spot price
+        is approaching major institutional Open Interest pinning zones (within 3.5%).
+        """
+        from src.scouts.deribit import DeribitScout
+        scout = DeribitScout()
+        pinning_alerts: List[Dict[str, Any]] = []
+
+        for curr in ["ETH", "BTC"]:
+            try:
+                clusters = scout.get_top_oi_clusters(currency=curr, min_oi=100.0, top_n=10, force_refresh=force_refresh)
+                idx_price = scout.get_index_price(currency=curr)
+                if not idx_price or not clusters:
+                    continue
+
+                for c in clusters:
+                    pin = c.get("break_even_pinning_level") or 0.0
+                    oi = c.get("open_interest") or 0.0
+                    if pin <= 0:
+                        continue
+
+                    dist_pct = abs(idx_price - pin) / idx_price * 100.0
+                    # Proximity trigger: spot is within 3.5% of major institutional pinning barrier
+                    if dist_pct <= 3.5:
+                        pinning_alerts.append({
+                            "asset": curr,
+                            "instrument": c["instrument"],
+                            "spot_price": round(idx_price, 2),
+                            "pinning_level": round(pin, 2),
+                            "distance_pct": round(dist_pct, 1),
+                            "open_interest": round(oi, 1),
+                            "option_type": c["type"],
+                            "reaction": c["expected_market_reaction"],
+                            "hedge_flow": c["forced_market_maker_flow"],
+                            "alert_text": (
+                                f"{curr} (${idx_price:,.2f}) в {dist_pct:.1f}% от Pinning ${pin:,.2f} "
+                                f"[{c['instrument']}, OI: {oi:,.0f}]. {c['expected_market_reaction']}"
+                            ),
+                        })
+            except Exception as e:
+                print(f"[Warning] Options pinning check failed for {curr}: {e}")
+
+        return pinning_alerts
+
 
 def run_daily_sensor(force_refresh: bool = False) -> List[Dict[str, Any]]:
     """Runs daily sensor and outputs clean report with optional Telegram notification."""
@@ -168,18 +213,28 @@ def run_daily_sensor(force_refresh: bool = False) -> List[Dict[str, Any]]:
     print("=" * 70)
     print("Критерии: 24h TVL > +25%, аномальный оборот объёма > 0.5x, всплеск сборов")
     print("Мониторинг портфеля: проверка входа цен в зоны добора (Buy Zones)")
+    print("Деривативы: мониторинг приближения цен к институциональным Pinning уровням Deribit")
     print("Затраты LLM / API Gemini: 0 (бесплатный сбор ончейн-данных)")
     print("-" * 70)
 
     sensor = DailySensor()
     anomalies = sensor.scan(force_refresh=force_refresh)
     buy_triggers = sensor.check_buy_zones(force_refresh=force_refresh)
+    pinning_alerts = sensor.check_options_pinning(force_refresh=force_refresh)
+
+    if pinning_alerts:
+        print("\n" + "-" * 70)
+        print("🎯 СИГНАЛЫ ДЕРИВАТИВОВ: ПРИБЛИЖЕНИЕ К УРОВНЯМ PINNING (DERIBIT):")
+        print("-" * 70)
+        for pa in pinning_alerts:
+            print(f"  • [{pa['asset']}] Спот ${pa['spot_price']:,.2f} в {pa['distance_pct']:.1f}% от {pa['instrument']} (Pinning: ${pa['pinning_level']:,.2f})")
+            print(f"    ➔ {pa['reaction']} (OI: {pa['open_interest']:,.0f} {pa['asset']})")
 
     print("\n" + "=" * 70)
     print("[Telegram] Отправка ежедневного отчёта...")
     try:
         from src.notifications.telegram import notify_daily_heartbeat
-        notify_daily_heartbeat(anomalies, buy_triggers)
+        notify_daily_heartbeat(anomalies, buy_triggers, options_alerts=pinning_alerts)
         print("[OK] Ежедневный отчёт успешно доставлен в Telegram.")
     except Exception as e:
         print(f"[!] Ошибка отправки: {e}")

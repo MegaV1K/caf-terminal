@@ -79,3 +79,29 @@ def test_quarterly_rebalance_empty():
 
         summary = rebalancer.rebalance()
         assert summary.get("empty") is True
+
+
+def test_daily_sensor_options_pinning_trigger():
+    """DailySensor should flag pinning alert when spot price is within 3.5% of an institutional barrier."""
+    sensor = DailySensor()
+    mock_clusters = [
+        {
+            "instrument": "ETH-25DEC26-2200-C",
+            "type": "CALL",
+            "open_interest": 50000.0,
+            "break_even_pinning_level": 2240.0,  # ~1.8% from $2200 spot
+            "expected_market_reaction": "Strong Resistance",
+            "forced_market_maker_flow": "SHORT_FUTURES_DELTA_HEDGE",
+        }
+    ]
+
+    from unittest.mock import patch
+    with patch("src.scouts.deribit.DeribitScout.get_top_oi_clusters", return_value=mock_clusters), \
+         patch("src.scouts.deribit.DeribitScout.get_index_price", return_value=2200.0):
+
+        alerts = sensor.check_options_pinning()
+        assert len(alerts) >= 1
+        eth_alert = next(a for a in alerts if a["asset"] == "ETH")
+        assert eth_alert["instrument"] == "ETH-25DEC26-2200-C"
+        assert eth_alert["distance_pct"] <= 3.5
+        assert "Strong Resistance" in eth_alert["reaction"]
