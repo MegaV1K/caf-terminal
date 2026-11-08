@@ -36,5 +36,9 @@ DEFILLAMA_CHAINS_URL = "https://api.llama.fi/v2/chains"
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 COINGECKO_TRENDING_URL = "https://api.coingecko.com/api/v3/search/trending"
 
+# Deribit Public API Endpoints (Free, no account/key required for public market data)
+DERIBIT_BASE_URL = "https://www.deribit.com/api/v2"
+DERIBIT_CACHE_TTL = int(os.getenv("DERIBIT_CACHE_TTL_MINUTES", "15")) * 60
+
 # Cache TTL in seconds (default: 4 hours)
 CACHE_TTL = int(os.getenv("CACHE_TTL_HOURS", "4")) * 3600

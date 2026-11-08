@@ -490,6 +490,40 @@ def run_risk_audit():
     print("=" * 70)
 
 
+def run_deribit_analysis(currency: str = "ETH", force_refresh: bool = False):
+    """Fetches live Deribit options data, institutional OI clusters, and pinning levels."""
+    curr = currency.upper()
+    print("\n" + "=" * 70)
+    print(f"📈 [DERIBIT] АНАЛИЗ ОПЦИОННОГО РЫНКА И КЛАСТЕРОВ ОТКРЫТОГО ИНТЕРЕСА: {curr}")
+    print("=" * 70)
+    from src.scouts.deribit import DeribitScout
+    scout = DeribitScout()
+    data = scout.analyze_options_market(currency=curr, force_refresh=force_refresh)
+
+    if data.get("empty"):
+        print("[!] Не удалось получить данные из API Deribit.")
+        return
+
+    print(f"Спотовый индекс ({curr}/USD): ${data['index_price']:,.2f}")
+    print(f"Историческая волатильность:   {data['historical_volatility_pct']:.1f}%")
+    print(f"Средняя подразумеваемая IV:    {data['average_mark_iv_pct']:.1f}%")
+    print(f"Открытый интерес (OI):         {data['total_open_interest_coins']:,.1f} {curr} (${data['total_open_interest_usd']:,.0f})")
+    print(f"Суточный объём торгов:         ${data['total_24h_volume_usd']:,.0f}")
+    print(f"Put / Call Ratio (по OI):      {data['put_call_ratio']} ➔ {data['sentiment']}")
+
+    print("\n" + "-" * 85)
+    print(f"{'Контракт':<22} {'Тип':<6} {'Страйк':<10} {'OI (монет)':<12} {'Премия ($)':<12} {'Pinning Уровень':<18}")
+    print("-" * 85)
+    for c in data.get("top_pinning_clusters", []):
+        pin_str = f"${c['break_even_pinning_level']:,.2f}"
+        print(f"{c['instrument']:<22} {c['type']:<6} ${c['strike']:<9,.0f} {c['open_interest']:<12,.1f} ${c['premium']:<11,.2f} {pin_str:<18}")
+
+    print("\n[Институциональные уровни реакции (Market Maker Delta-Hedge Flow)]:")
+    for c in data.get("top_pinning_clusters", [])[:5]:
+        print(f"  • {c['instrument']}: {c['expected_market_reaction']} (Хедж: {c['forced_market_maker_flow']})")
+    print("=" * 85)
+
+
 def run_weekly_cycle(top_n: int = 20, candidates: int = 5, force_refresh: bool = False):
     """Executes the complete weekly investment cycle: Radar Top 20 + Committee."""
     print("\n" + "=" * 70)
@@ -516,6 +550,9 @@ def main():
     parser.add_argument("--quarterly",  action="store_true", help="Алиас для --rebalance")
     parser.add_argument("--risk",       action="store_true", help="[Risk] Институциональный аудит рисков портфеля и тильт-контроля")
     parser.add_argument("--risk-audit", action="store_true", help="Алиас для --risk")
+    parser.add_argument("--deribit",    action="store_true", help="[Deribit] Онлайн-анализ опционов, открытого интереса и pinning-уровней")
+    parser.add_argument("--options",    action="store_true", help="Алиас для --deribit")
+    parser.add_argument("--currency",   type=str, default="ETH", help="Базовая валюта для Deribit (ETH или BTC, по умолчанию: ETH)")
 
     # Core components
     parser.add_argument("--deep-dive",  type=str, default="", help="[Dossier] Глубокий 10-пунктовый институциональный аудит токена")
@@ -584,6 +621,8 @@ def main():
         run_asymmetric_screening(top_n=args.top, force_refresh=args.refresh)
     elif args.risk or args.risk_audit:
         run_risk_audit()
+    elif args.deribit or args.options:
+        run_deribit_analysis(currency=args.currency, force_refresh=args.refresh)
     elif args.pnl:
         run_pnl_view()
     elif args.registry:
