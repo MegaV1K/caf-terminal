@@ -312,8 +312,8 @@ class CommitteeOrchestrator:
 Структура брифинга (строго 4 пункта):
 1. **СТРАТЕГИЧЕСКИЙ ФОКУС:** Главный нарратив и почему сигнал важен (или подозрителен).
 2. **ЗАДАНИЕ АНАЛИТИКУ:** На какой именно точке ценности (Value Capture, ров, органика) сосредоточить тезис.
-3. **ЗАДАНИЕ СКЕПТИКУ:** Какой конкретный критический риск (накрутка объёма, дефолт пула, разлоки, невозврат кредитов) разгромить в первую очередь.
-4. **ЛИМИТ КЛАСТЕРА / ПОРТФЕЛЬНЫЙ КОНТЕКСТ:** Как проект сочетается с текущей экспозицией портфеля.
+3. **ЗАДАНИЕ СКЕПТИКУ:** Какой конкретный критический риск (накрутка объёма, дефолт пула, разлоки, комиссионный/спредовый дренаж) разгромить в первую очередь.
+4. **ЛИМИТ КЛАСТЕРА / ПОРТФЕЛЬНЫЙ КОНТЕКСТ:** Проверка лимита кластера (макс 10.0%), защита от тильта (Anti-Gemini Tilt Guard) и фильтр слепого копирования (Anti-Herding).
 
 Будь кратким, директивным и предельно профессиональным. На русском языке."""
 
@@ -389,6 +389,8 @@ class SkepticAgent:
 **РИСКИ И СЛАБЫЕ МЕСТА:**
 - Value Capture риск: действительно ли токен захватывает ценность, или это иллюзия?
 - Токеномика: навес предложения, инфляция, разлоки — что разрушит цену?
+- Комиссионный и спредовый риск: не съедят ли транзакционные издержки и спреды всю прибыль (Notional fee drag / Liquidity trap)?
+- Anti-Herding: не является ли интерес слепым копированием чужого хайпа без математической основы?
 - Конкуренция: кто сделает это лучше и дешевле?
 - Execution risk: команда, продукт, рынок — что может провалиться?
 
@@ -443,6 +445,7 @@ class CFOAgent:
         analyst_thesis: str,
         skeptic_critique: str,
         orchestrator_brief: str = "",
+        cluster_exposure: Optional[Dict[str, float]] = None,
     ) -> CommitteeReport:
         prompt = (
             f"ПРОЕКТ: {signal.name} ({signal.symbol})\n\n"
@@ -474,6 +477,22 @@ class CFOAgent:
         next_steps = data.get("next_steps", [])
         if isinstance(next_steps, str):
             next_steps = [next_steps]
+
+        # Programmatic TiltGuard Check (Anti-Gemini & Cluster Risk)
+        if cluster_exposure:
+            from src.risk.tilt_guard import TiltGuard
+            sector = signal.category or "Unknown"
+            cur_weight = cluster_exposure.get(sector, 0.0)
+            risk_check = TiltGuard.audit_trade_risk(
+                symbol=signal.symbol,
+                requested_weight_pct=2.0,
+                cluster_name=sector,
+                current_cluster_weight_pct=cur_weight,
+            )
+            if not risk_check["is_approved"] and verdict == Verdict.FULL_CAF:
+                verdict = Verdict.INCUBATOR
+                reasoning = f"[TILT_GUARD_VETO: {'; '.join(risk_check['violations'])}] " + reasoning
+                next_steps.insert(0, f"Лимит кластера '{sector}' исчерпан. Позиция переведена в карантин наблюдения.")
 
         return CommitteeReport(
             signal=signal,
@@ -518,7 +537,13 @@ class InvestmentCommittee:
         critique = self.skeptic.critique(signal, thesis, orchestrator_brief=brief)
 
         print("[CFO]          Принимаю финальное решение (JSON)...")
-        report = self.cfo.decide(signal, thesis, critique, orchestrator_brief=brief)
+        report = self.cfo.decide(
+            signal,
+            thesis,
+            critique,
+            orchestrator_brief=brief,
+            cluster_exposure=cluster_exposure,
+        )
 
         verdict_display = {
             Verdict.FULL_CAF:  "[!!!] FULL CAF - СРОЧНЫЙ АНАЛИЗ",

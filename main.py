@@ -454,6 +454,42 @@ def run_set_price(symbol: str, entry: float = None, current: float = None, targe
     run_pnl_view()
 
 
+def run_risk_audit():
+    """Executes institutional risk and derivatives safety audit."""
+    print("\n" + "=" * 70)
+    print("🛡️ [RISK AUDIT] ИНСТИТУЦИОНАЛЬНЫЙ АУДИТ РИСКОВ И ТИЛЬТ-КОНТРОЛЯ")
+    print("=" * 70)
+    from src.risk.risk_manager import InstitutionalRiskManager
+    mgr = InstitutionalRiskManager()
+    summary = mgr.audit_portfolio_risk()
+
+    print(f"Статус портфеля: {'✅ В ПРЕДЕЛАХ НОРМЫ' if summary['is_healthy'] else '⚠️ ТРЕБУЕТСЯ ВНИМАНИЕ'}")
+    print(f"Активных активов: {summary['total_active_assets']}")
+    print("\n[+] Распределение по риск-кластерам (Лимит: 10.0%):")
+    for cl, wt in summary['cluster_breakdown'].items():
+        flag = "🚨" if wt > 10.0 else "✅"
+        print(f"  {flag} {cl:<25}: {wt:.1f}%")
+
+    if summary['cluster_breaches']:
+        print("\n🚨 Превышение лимита кластеров:")
+        for cb in summary['cluster_breaches']:
+            print(f"  - {cb['cluster']}: {cb['weight_pct']}% (избыток +{cb['excess_pct']}%)")
+
+    if summary['tilt_locks']:
+        print("\n🔒 Активы с блокировкой тильта (Anti-Gemini Tilt Guard, PnL < -15%):")
+        for t in summary['tilt_locks']:
+            print(f"  - {t['symbol']} ({t['name']}): {t['pnl']:.1f}% ➔ ЗАПРЕТ УСРЕДНЕНИЯ И ПЛЕЧА")
+
+    if summary['invalidation_alerts']:
+        print("\n⛔ Недействительные тезисы (Drawdown > 25%):")
+        for inv in summary['invalidation_alerts']:
+            print(f"  - {inv['symbol']} ({inv['name']}): {inv['pnl']:.1f}% ➔ РЕВИЗИЯ ИЛИ ВЫХОД")
+
+    print("\n" + "=" * 70)
+    print(f"[OK] Подробный отчет сохранен в: {summary['report_path']}")
+    print("=" * 70)
+
+
 def run_weekly_cycle(top_n: int = 20, candidates: int = 5, force_refresh: bool = False):
     """Executes the complete weekly investment cycle: Radar Top 20 + Committee."""
     print("\n" + "=" * 70)
@@ -478,6 +514,8 @@ def main():
     parser.add_argument("--monthly",    action="store_true", help="Алиас для --audit")
     parser.add_argument("--rebalance",  action="store_true", help="[Квартал] Квартальная ребалансировка, PnL и фиксация прибыли")
     parser.add_argument("--quarterly",  action="store_true", help="Алиас для --rebalance")
+    parser.add_argument("--risk",       action="store_true", help="[Risk] Институциональный аудит рисков портфеля и тильт-контроля")
+    parser.add_argument("--risk-audit", action="store_true", help="Алиас для --risk")
 
     # Core components
     parser.add_argument("--deep-dive",  type=str, default="", help="[Dossier] Глубокий 10-пунктовый институциональный аудит токена")
@@ -544,6 +582,8 @@ def main():
         engine.generate_dossier(target_ticker, force_refresh=args.refresh)
     elif args.asymmetric or args.alpha:
         run_asymmetric_screening(top_n=args.top, force_refresh=args.refresh)
+    elif args.risk or args.risk_audit:
+        run_risk_audit()
     elif args.pnl:
         run_pnl_view()
     elif args.registry:
