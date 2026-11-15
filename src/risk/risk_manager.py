@@ -16,6 +16,7 @@ from src.risk.tilt_guard import TiltGuard
 from src.risk.trend_gate import PriceTrendGate
 from src.risk.inflation_gate import HardInflationGate
 from src.risk.market_neutral import MarketNeutralEngine
+from src.risk.curator_risk import CuratorRiskGate
 
 
 class InstitutionalRiskManager:
@@ -28,6 +29,7 @@ class InstitutionalRiskManager:
         self.trend_gate = PriceTrendGate()
         self.inflation_gate = HardInflationGate()
         self.market_neutral = MarketNeutralEngine()
+        self.curator_risk = CuratorRiskGate()
 
     def audit_spot_trade(
         self,
@@ -281,6 +283,11 @@ class InstitutionalRiskManager:
         lines.append("- **Правило 200 EMA**: Если цена актива находится ниже 200 EMA — его целевой вес обнуляется (0.0%).")
         lines.append("- **Защита от падающих ножей**: Высвобожденный капитал принудительно направляется в `USDC_YIELD_RESERVE`.")
         lines.append("- **Запрет усреднения**: Покупка разрешена исключительно при подтверждении восходящего тренда.")
+
+        lines.append("\n## 7. Контроль кураторов и RWA-резервов (DeFi Learn Framework)")
+        lines.append("- **Анти-концентрация залога**: Запрещено размещение капитала в ваултах, где один залог занимает > 40% рынка.")
+        lines.append("- **Защита от оракульных эксплойтов**: Запрещены пулы с единичными или нестандартными оракулами без Dual Feed.")
+        lines.append("- **RWA Cash Allocation**: При фандинге < 8% годовых 85% резерва паркуется в RWA (sUSDS, USDY, BUIDL) без левередж-лупов.")
 
         with open(file_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
