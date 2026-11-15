@@ -13,6 +13,9 @@ from config import REPORTS_DIR
 from src.database.registry import CAFRegistry
 from src.risk.derivatives_risk import DerivativesRiskEngine
 from src.risk.tilt_guard import TiltGuard
+from src.risk.trend_gate import PriceTrendGate
+from src.risk.inflation_gate import HardInflationGate
+from src.risk.market_neutral import MarketNeutralEngine
 
 
 class InstitutionalRiskManager:
@@ -22,6 +25,9 @@ class InstitutionalRiskManager:
         self.derivatives = DerivativesRiskEngine()
         self.tilt_guard = TiltGuard()
         self.registry = CAFRegistry()
+        self.trend_gate = PriceTrendGate()
+        self.inflation_gate = HardInflationGate()
+        self.market_neutral = MarketNeutralEngine()
 
     def audit_spot_trade(
         self,
@@ -167,6 +173,32 @@ class InstitutionalRiskManager:
                     "excess_pct": round(weight - self.tilt_guard.MAX_CLUSTER_WEIGHT_PCT, 1),
                 })
 
+        # 4. Hard Inflation Audit
+        known_financials = {
+            "AKT": {"emissions": 33_500_000, "fees": 2_700_000, "circ": 77.0},
+            "RENDER": {"emissions": 20_000_000, "fees": 4_500_000, "circ": 72.0},
+            "AAVE": {"emissions": 0, "fees": 50_000_000, "circ": 93.0},
+            "JUP": {"emissions": 0, "fees": 210_000_000, "circ": 50.0},
+            "PENDLE": {"emissions": 1_000_000, "fees": 30_000_000, "circ": 98.0},
+            "FLUID": {"emissions": 0, "fees": 44_000_000, "circ": 83.7},
+            "INJ": {"emissions": 6_000_000, "fees": 7_200_000, "circ": 100.0},
+        }
+
+        disqualified_for_long = []
+        for a in active_portfolio:
+            sym = a["symbol"].upper()
+            fin = known_financials.get(sym)
+            if fin:
+                audit = self.inflation_gate.audit_asset_inflation(
+                    symbol=sym,
+                    name=a["name"],
+                    annual_emissions_usd=fin["emissions"],
+                    annual_fees_burned_usd=fin["fees"],
+                    circulating_pct=fin["circ"],
+                )
+                if not audit["is_qualified_for_long"]:
+                    disqualified_for_long.append(audit)
+
         report_summary = {
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total_active_assets": len(active_portfolio),
@@ -174,7 +206,12 @@ class InstitutionalRiskManager:
             "cluster_breaches": cluster_breaches,
             "tilt_locks": tilt_risks,
             "invalidation_alerts": invalidation_alerts,
-            "is_healthy": len(cluster_breaches) == 0 and len(invalidation_alerts) == 0,
+            "disqualified_for_long": disqualified_for_long,
+            "is_healthy": (
+                len(cluster_breaches) == 0
+                and len(invalidation_alerts) == 0
+                and len(disqualified_for_long) == 0
+            ),
         }
 
         report_path = self._save_risk_report(report_summary)
@@ -226,6 +263,24 @@ class InstitutionalRiskManager:
         lines.append("- **Margin Cliff**: Запрещено удерживать фьючерсы под обеспечение опционами за < 48ч до экспирации.")
         lines.append("- **Notional Fee**: Комиссия на опционах считается от полного номинала. Если комиссия > 15% ожидаемого профита — вход заблокирован.")
         lines.append("- **Liquidity Guard**: Если спред Bid-Ask > 20% от прибыли — фиксация только через синтетический дельта-хедж фьючерсом.")
+
+        lines.append("\n## 5. Фильтр инфляционного размытия (Hard Inflation Gate)")
+        if summary.get("disqualified_for_long"):
+            lines.append("| Тикер | Проект | Эмиссия ($/год) | Сборы ($/год) | Dilution Ratio | Статус | Действие |")
+            lines.append("|---|---|---|---|---|---|---|")
+            for d in summary["disqualified_for_long"]:
+                lines.append(
+                    f"| **{d['symbol']}** | {d['name']} | ${d['annual_emissions_usd']:,.0f} | "
+                    f"${d['annual_fees_burned_usd']:,.0f} | **{d['dilution_ratio']}x** | "
+                    f"⛔ `{d['severity']}` | **Перевести в SHORT_RADAR / 0% Long** |"
+                )
+        else:
+            lines.append("✅ Все активные активы соответствуют критериям чистой безубыточной токеномики.\n")
+
+        lines.append("\n## 6. Ценовой фильтр капитала (Price Trend Gate & USDC Buffer)")
+        lines.append("- **Правило 200 EMA**: Если цена актива находится ниже 200 EMA — его целевой вес обнуляется (0.0%).")
+        lines.append("- **Защита от падающих ножей**: Высвобожденный капитал принудительно направляется в `USDC_YIELD_RESERVE`.")
+        lines.append("- **Запрет усреднения**: Покупка разрешена исключительно при подтверждении восходящего тренда.")
 
         with open(file_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))

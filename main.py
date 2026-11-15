@@ -480,6 +480,11 @@ def run_risk_audit():
         for t in summary['tilt_locks']:
             print(f"  - {t['symbol']} ({t['name']}): {t['pnl']:.1f}% ➔ ЗАПРЕТ УСРЕДНЕНИЯ И ПЛЕЧА")
 
+    if summary.get('disqualified_for_long'):
+        print("\n⛔ Дисквалификация из Лонгов (Hard Inflation Gate — Эмиссия > Сборов):")
+        for d in summary['disqualified_for_long']:
+            print(f"  - {d['symbol']} ({d['name']}): Эмиссия в {d['dilution_ratio']}x выше сборов ➔ 0% ВЕС / SHORT_RADAR")
+
     if summary['invalidation_alerts']:
         print("\n⛔ Недействительные тезисы (Drawdown > 25%):")
         for inv in summary['invalidation_alerts']:
@@ -522,6 +527,54 @@ def run_deribit_analysis(currency: str = "ETH", force_refresh: bool = False):
     for c in data.get("top_pinning_clusters", [])[:5]:
         print(f"  • {c['instrument']}: {c['expected_market_reaction']} (Хедж: {c['forced_market_maker_flow']})")
     print("=" * 85)
+
+
+def run_market_neutral(notional_usd: float = 100_000.0):
+    """Executes non-directional, asymmetric profit strategies on market inefficiencies."""
+    print("\n" + "=" * 75)
+    print("⚖️ [MARKET-NEUTRAL] МОДУЛЬ РЫНОЧНО-НЕЙТРАЛЬНЫХ И ДЕЛЬТА-АРБИТРАЖНЫХ СТРАТЕГИЙ")
+    print("=" * 75)
+    from src.risk.market_neutral import MarketNeutralEngine
+    engine = MarketNeutralEngine()
+
+    pair = engine.construct_pair_trade(
+        long_benchmark="BTC",
+        short_basket=["AKT", "RENDER"],
+        total_notional_usd=notional_usd,
+    )
+    print("\n1. 📊 RELATIVE VALUE / BETA-NEUTRAL СТРАТЕГИЯ:")
+    print(f"   • Лонг бенчмарка: {pair['long_leg']['symbol']} (${pair['long_leg']['capital_usd']:,.0f}, {pair['long_leg']['weight_pct']}%)")
+    print("   • Шорт инфляционной корзины:")
+    for s in pair["short_leg"]:
+        print(f"     - SHORT {s['symbol']}: ${s['capital_usd']:,.0f} ({s['weight_pct']}%) ➔ {s['rationale']}")
+    print("   • Сценарии выплат:")
+    for sc, desc in pair["expected_payoff_scenarios"].items():
+        print(f"     * {sc:<18}: {desc}")
+
+    arb = engine.evaluate_funding_arbitrage(
+        symbol="ETH",
+        spot_price=2240.0,
+        perp_price=2241.5,
+        funding_rate_8h_pct=0.025,
+        notional_size_usd=notional_usd,
+    )
+    print("\n2. 💸 FUNDING RATE ARBITRAGE (CASH & CARRY):")
+    print(f"   • Базовый актив: ETH (Фандинг 8ч: {arb['funding_rate_8h_pct']}%, Годовой APR: {arb['annualized_funding_apr_pct']}%)")
+    print(f"   • Рекомендуемая позиция: {arb['recommended_trade']} ({arb['who_pays']})")
+    print(f"   • Окупаемость комиссий: {arb['days_to_breakeven']} дн., Расчетный доход: ${arb['estimated_monthly_profit_usd']:,.2f}/мес")
+
+    pt = engine.evaluate_fixed_yield_stripping(
+        base_asset="USDe",
+        maturity_date="2027-03-25",
+        pt_discount_price=0.935,
+        days_to_maturity=180,
+    )
+    print("\n3. 💵 ФИКСИРОВАННЫЙ ДОХОД В ДОЛЛАРАХ (PENDLE PT YIELD STRIPPING):")
+    print(f"   • Инструмент: PT-{pt['base_asset']} (Экспирация: {pt['maturity_date']})")
+    print(f"   • Цена покупки: ${pt['pt_purchase_price']} (Дисконт к номиналу: {pt['discount_captured_pct']}%)")
+    print(f"   • Гарантированная фиксированная доходность: {pt['guaranteed_fixed_apy_pct']}% годовых")
+    print(f"   • Риск цены крипты: {pt['directional_crypto_risk']}")
+    print("=" * 75)
 
 
 def run_daemon_loop(interval_sec: int = 3600):
@@ -592,6 +645,8 @@ def main():
     parser.add_argument("--currency",   type=str, default="ETH", help="Базовая валюта для Deribit (ETH или BTC, по умолчанию: ETH)")
     parser.add_argument("--daemon",     action="store_true", help="[Daemon] Непрерывный автономный цикл мониторинга опционов и рисков")
     parser.add_argument("--interval",   type=int, default=3600, help="Интервал автономной сверки в секундах (по умолчанию: 3600 = 1 час)")
+    parser.add_argument("--neutral",    action="store_true", help="[Neutral] Модуль рыночно-нейтральных и дельта-арбитражных стратегий")
+    parser.add_argument("--market-neutral", action="store_true", help="Алиас для --neutral")
 
     # Core components
     parser.add_argument("--deep-dive",  type=str, default="", help="[Dossier] Глубокий 10-пунктовый институциональный аудит токена")
@@ -662,6 +717,8 @@ def main():
         run_risk_audit()
     elif args.deribit or args.options:
         run_deribit_analysis(currency=args.currency, force_refresh=args.refresh)
+    elif args.neutral or args.market_neutral:
+        run_market_neutral()
     elif args.daemon:
         run_daemon_loop(interval_sec=args.interval)
     elif args.pnl:
