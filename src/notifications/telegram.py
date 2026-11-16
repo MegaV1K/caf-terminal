@@ -175,7 +175,7 @@ def notify_daily_heartbeat(
         reg = CAFRegistry()
         p = reg.get_active_portfolio()
         total_deployed = sum(a.get("target_weight", 0) for a in p) if p else 0.0
-        lines.append(f"\n📊 <b>Статус портфеля:</b> 20 активов в мониторинге")
+        lines.append(f"\n📊 <b>Статус портфеля:</b> {len(p)} активов в мониторинге")
         lines.append(f"• Аллокация альтов: <b>{total_deployed:.1f}%</b> | Буфер кэша (USDC): <b>{max(0.0, round(100.0 - total_deployed, 1)):.1f}%</b>")
     except Exception:
         pass

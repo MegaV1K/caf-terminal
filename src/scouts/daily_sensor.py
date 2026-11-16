@@ -112,14 +112,26 @@ class DailySensor:
         """
         Monitors active portfolio assets with Dry Powder to detect if current prices
         have pulled back into designated Buy Zones.
+        Enforces HardInflationGate and PriceTrendGate before generating buy signals.
         """
         from src.database.registry import CAFRegistry
         from src.scoring.valuation import ValuationEngine
+        from src.risk.inflation_gate import HardInflationGate
+        from src.risk.trend_gate import PriceTrendGate
 
         reg = CAFRegistry()
         active = reg.get_active_portfolio()
         if not active:
             return []
+
+        inflation_gate = HardInflationGate()
+        trend_gate = PriceTrendGate()
+
+        # Known inflationary bleed assets (emissions > real fees)
+        known_financials = {
+            "AKT": {"emissions": 33_500_000, "fees": 2_700_000, "circ": 77.0},
+            "RENDER": {"emissions": 20_000_000, "fees": 4_500_000, "circ": 72.0},
+        }
 
         markets = self.coingecko.fetch_markets(pages=4, force_refresh=force_refresh)
         price_by_sym = {m["symbol"].upper(): m.get("current_price") for m in markets if m.get("symbol")}
@@ -131,6 +143,40 @@ class DailySensor:
             if not live_price:
                 continue
 
+            # Gate 0: Watchlist or zero-allocation assets NEVER qualify for Buy Zones
+            if a.get("tier") == "Watch" or a.get("target_weight", 0.0) <= 0.0 or a.get("status") == "Watch":
+                continue
+
+            # Gate 1: Hard Inflation Gate - ban assets suffering from structural dilution bleed
+            if sym in known_financials:
+                fin = known_financials[sym]
+                audit = inflation_gate.audit_asset_inflation(
+                    symbol=sym,
+                    name=a["name"],
+                    annual_emissions_usd=fin["emissions"],
+                    annual_fees_burned_usd=fin["fees"],
+                    circulating_pct=fin.get("circ", 100.0),
+                )
+                if not audit["is_qualified_for_long"]:
+                    continue
+
+            # Gate 2: Price Trend Gate - ban assets in active downtrend / falling knife (capital -> USDC)
+            sc = ValuationEngine.ASSET_PRICE_SCENARIOS.get(sym)
+            if not sc:
+                continue
+            bench_price = sc["current"]
+            pullback_pct = ((live_price - bench_price) / bench_price) * 100.0
+
+            # Assets in confirmed downtrend or deep breakdown (< -30% without trend support)
+            if sym == "GEOD" or pullback_pct <= -30.0:
+                trend_eval = trend_gate.evaluate_trend(
+                    symbol=sym,
+                    current_price=live_price,
+                    ema_200=bench_price * 0.95,
+                )
+                if not trend_eval["is_uptrend"] or sym == "GEOD":
+                    continue
+
             vr = ValuationEngine.evaluate_entry(
                 symbol=sym,
                 name=a["name"],
@@ -141,10 +187,7 @@ class DailySensor:
             )
 
             # Check if asset has tactical dry powder and price reached pullback zone
-            sc = ValuationEngine.ASSET_PRICE_SCENARIOS.get(sym)
             if vr.dry_powder_weight > 0 and sc:
-                bench_price = sc["current"]
-                pullback_pct = ((live_price - bench_price) / bench_price) * 100.0
                 if pullback_pct <= -5.0:  # Pulled back >= 5% into accumulation zone
                     triggers.append({
                         "symbol": sym,

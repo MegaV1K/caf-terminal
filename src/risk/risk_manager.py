@@ -187,8 +187,12 @@ class InstitutionalRiskManager:
         }
 
         disqualified_for_long = []
-        for a in active_portfolio:
+        seen_syms = set()
+        for a in all_assets:
             sym = a["symbol"].upper()
+            if sym in seen_syms:
+                continue
+            seen_syms.add(sym)
             fin = known_financials.get(sym)
             if fin:
                 audit = self.inflation_gate.audit_asset_inflation(
@@ -201,6 +205,11 @@ class InstitutionalRiskManager:
                 if not audit["is_qualified_for_long"]:
                     disqualified_for_long.append(audit)
 
+        active_disqualified = [
+            d for d in disqualified_for_long
+            if any(a["symbol"].upper() == d["symbol"] for a in active_portfolio)
+        ]
+
         report_summary = {
             "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total_active_assets": len(active_portfolio),
@@ -212,7 +221,7 @@ class InstitutionalRiskManager:
             "is_healthy": (
                 len(cluster_breaches) == 0
                 and len(invalidation_alerts) == 0
-                and len(disqualified_for_long) == 0
+                and len(active_disqualified) == 0
             ),
         }
 
