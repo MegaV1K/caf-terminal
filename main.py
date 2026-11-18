@@ -535,7 +535,10 @@ def run_market_neutral(notional_usd: float = 100_000.0):
     print("⚖️ [MARKET-NEUTRAL] МОДУЛЬ РЫНОЧНО-НЕЙТРАЛЬНЫХ И ДЕЛЬТА-АРБИТРАЖНЫХ СТРАТЕГИЙ")
     print("=" * 75)
     from src.risk.market_neutral import MarketNeutralEngine
+    from src.scouts.live_yield_scout import LiveYieldScout
+
     engine = MarketNeutralEngine()
+    scout = LiveYieldScout()
 
     pair = engine.construct_pair_trade(
         long_benchmark="BTC",
@@ -551,29 +554,30 @@ def run_market_neutral(notional_usd: float = 100_000.0):
     for sc, desc in pair["expected_payoff_scenarios"].items():
         print(f"     * {sc:<18}: {desc}")
 
-    arb = engine.evaluate_funding_arbitrage(
-        symbol="ETH",
-        spot_price=2240.0,
-        perp_price=2241.5,
-        funding_rate_8h_pct=0.025,
-        notional_size_usd=notional_usd,
-    )
-    print("\n2. 💸 FUNDING RATE ARBITRAGE (CASH & CARRY):")
-    print(f"   • Базовый актив: ETH (Фандинг 8ч: {arb['funding_rate_8h_pct']}%, Годовой APR: {arb['annualized_funding_apr_pct']}%)")
-    print(f"   • Рекомендуемая позиция: {arb['recommended_trade']} ({arb['who_pays']})")
-    print(f"   • Окупаемость комиссий: {arb['days_to_breakeven']} дн., Расчетный доход: ${arb['estimated_monthly_profit_usd']:,.2f}/мес")
+    print("\n2. 💸 LIVE FUNDING RATE ARBITRAGE (CASH & CARRY):")
+    print("   [Gate.io Spot/Perp Arbitrage with 7d Funding Stability]")
+    gate_opps = scout.fetch_gate_funding_with_spot_filter(min_apr_pct=8.0)
+    if gate_opps:
+        for opp in gate_opps[:4]:
+            print(f"   • {opp['symbol']}: Фандинг 8ч {opp['funding_rate_8h_pct']:+.4f}% | Годовой APR: {opp['current_apr_pct']:+.1f}% | 7d: {opp['stability_status']} | Спот 24ч объём: ${opp['spot_24h_vol_usd']:,.0f}")
+    else:
+        print("   • Нет доступных пар с устойчивым фандингом >= 8.0% APR и спотовой ликвидностью.")
 
-    pt = engine.evaluate_fixed_yield_stripping(
-        base_asset="USDe",
-        maturity_date="2027-03-25",
-        pt_discount_price=0.935,
-        days_to_maturity=180,
-    )
-    print("\n3. 💵 ФИКСИРОВАННЫЙ ДОХОД В ДОЛЛАРАХ (PENDLE PT YIELD STRIPPING):")
-    print(f"   • Инструмент: PT-{pt['base_asset']} (Экспирация: {pt['maturity_date']})")
-    print(f"   • Цена покупки: ${pt['pt_purchase_price']} (Дисконт к номиналу: {pt['discount_captured_pct']}%)")
-    print(f"   • Гарантированная фиксированная доходность: {pt['guaranteed_fixed_apy_pct']}% годовых")
-    print(f"   • Риск цены крипты: {pt['directional_crypto_risk']}")
+    print("\n   [Hyperliquid Perpetual Funding Top Yields]")
+    hl_opps = scout.fetch_hyperliquid_funding(min_apr_pct=8.0)
+    if hl_opps:
+        for opp in hl_opps[:4]:
+            print(f"   • {opp['symbol']}: Фандинг 8ч {opp['funding_rate_8h_pct']:+.3f}% | APR: {opp['current_apr_pct']:+.1f}% | 24ч объём: ${opp['volume_24h_usd']:,.0f} | Открытый интерес: ${opp['open_interest_usd']:,.0f}")
+    else:
+        print("   • На Hyperliquid нет инструментов с APR фандинга >= 8.0%.")
+
+    print("\n3. 💵 ФИКСИРОВАННЫЙ ДОХОД В ДОЛЛАРАХ (LIVE PENDLE PT MARKETS):")
+    pt_markets = scout.fetch_pendle_pt_markets(chain_id=1, min_apy_pct=5.0)
+    if pt_markets:
+        for pt in pt_markets[:5]:
+            print(f"   • {pt['pt_symbol']} (Экспирация: {pt['expiry_date']}): Фикс. доход {pt['implied_fixed_apy_pct']:.2f}% APY | Дисконт: {pt['discount_pct']:.2f}% | Ликвидность: ${pt['liquidity_usd']:,.0f}")
+    else:
+        print("   • На Pendle V2 нет активных пулов с APY >= 5.0%.")
     print("=" * 75)
 
 
@@ -663,6 +667,7 @@ def main():
     parser.add_argument("--entry",      type=float, default=None, help="Цена входа ($)")
     parser.add_argument("--current",    type=float, default=None, help="Текущая рыночная цена ($)")
     parser.add_argument("--target",     type=float, default=None, help="Целевая цена ($)")
+    parser.add_argument("--update-prices", action="store_true", help="Синхронизировать живые рыночные цены и PnL для всех активов реестра")
     parser.add_argument("--seed",       action="store_true", help="Перезаполнить базу данных из истории беседы")
     parser.add_argument("--refresh",    action="store_true", help="Игнорировать кэш и обновить данные")
     parser.add_argument("--top",        type=int, default=20, help="Количество проектов в радаре (по умолчанию: 20)")
@@ -671,6 +676,13 @@ def main():
     args = parser.parse_args()
 
     # 1. Maintenance
+    if args.update_prices:
+        from src.database.registry import CAFRegistry
+        reg = CAFRegistry()
+        res = reg.update_live_prices(force_refresh=args.refresh)
+        print(f"[+] Успешно обновлены живые цены для {res['updated_count']} из {res['total_assets']} активов в базе caf_registry.db.")
+        return
+
     if args.seed:
         from src.database.registry import CAFRegistry
         reg = CAFRegistry()

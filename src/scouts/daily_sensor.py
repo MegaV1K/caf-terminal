@@ -160,21 +160,27 @@ class DailySensor:
                 if not audit["is_qualified_for_long"]:
                     continue
 
-            # Gate 2: Price Trend Gate - ban assets in active downtrend / falling knife (capital -> USDC)
+            # Gate 2: Real Exchange 200 EMA / 200 SMA Price Trend Gate
+            # Replaces fictitious bench_price * 0.95 with real daily exchange candlestick calculation
             sc = ValuationEngine.ASSET_PRICE_SCENARIOS.get(sym)
             if not sc:
                 continue
             bench_price = sc["current"]
             pullback_pct = ((live_price - bench_price) / bench_price) * 100.0
 
-            # Assets in confirmed downtrend or deep breakdown (< -30% without trend support)
-            if sym == "GEOD" or pullback_pct <= -30.0:
+            trend_tech = trend_gate.calculate_technical_trend(sym, live_price)
+            if trend_tech["has_real_candles"]:
+                real_ema_200 = trend_tech["ema_200"]
                 trend_eval = trend_gate.evaluate_trend(
                     symbol=sym,
                     current_price=live_price,
-                    ema_200=bench_price * 0.95,
+                    ema_200=real_ema_200,
                 )
-                if not trend_eval["is_uptrend"] or sym == "GEOD":
+                if not trend_eval["is_uptrend"]:
+                    continue
+            else:
+                # Conservative fallback if insufficient candle history exists
+                if sym == "GEOD" or pullback_pct <= -30.0:
                     continue
 
             vr = ValuationEngine.evaluate_entry(

@@ -16,6 +16,11 @@ class CAFRegistry:
     Incubator Watchlist, and Committee Deliberation History.
     """
 
+    MAX_CORE_ASSETS = 6          # Core (55% капитала, ~9.1% на актив)
+    MAX_HIGH_CONV_ASSETS = 8     # High Conviction (30% капитала, ~3.75% на актив)
+    MAX_INCUBATOR_ASSETS = 6     # Incubator (15% капитала, ~2.5% на актив)
+    MAX_ACTIVE_PORTFOLIO = 20    # СТРОГО максимум 20 активов в активном портфеле
+
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self._init_db()
@@ -45,12 +50,13 @@ class CAFRegistry:
                     status TEXT DEFAULT 'Active',
                     last_reviewed TEXT,
                     updated_at TEXT,
-                    -- PnL tracking fields (v2)
                     entry_price REAL,
                     entry_date TEXT,
                     target_price REAL,
                     current_price REAL,
-                    pnl_pct REAL
+                    pnl_pct REAL,
+                    target_weight REAL,
+                    cluster TEXT
                 )
             """)
 
@@ -73,7 +79,7 @@ class CAFRegistry:
                 )
             """)
 
-            # 3. Migrate existing DBs: add PnL and allocation columns if they don't exist
+            # 3. Add any missing columns to existing databases
             existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(assets)")}
             extra_cols = {
                 "entry_price":   "REAL",
@@ -140,13 +146,11 @@ class CAFRegistry:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_conn() as conn:
             cur = conn.cursor()
-            # Fetch current values
             row = cur.execute(
                 "SELECT entry_price, current_price FROM assets WHERE symbol = ?",
                 (symbol.upper(),)
             ).fetchone()
             if not row:
-                print(f"[Registry] Symbol {symbol} not found — skipping price update.")
                 return
 
             eff_entry = entry_price if entry_price is not None else (row["entry_price"] or 0)
@@ -167,11 +171,77 @@ class CAFRegistry:
             """, (entry_price, entry_date, target_price, current_price, pnl, now_str, symbol.upper()))
             conn.commit()
 
+    def update_live_prices(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Queries live prices across market scouts (CoinGecko + Gate.io fallback)
+        and updates all registered assets with live market prices and recalculated PnL.
+        """
+        import requests
+        from src.scouts.coingecko import CoinGeckoScout
+        from src.scoring.valuation import ValuationEngine
+
+        cg = CoinGeckoScout()
+        markets = cg.fetch_markets(pages=4, force_refresh=force_refresh)
+        price_map: Dict[str, float] = {}
+
+        for m in markets:
+            sym = m.get("symbol", "").upper()
+            p = m.get("current_price")
+            if sym and p is not None:
+                price_map[sym] = float(p)
+
+        # Gate.io spot tickers fallback for any tokens missing in CoinGecko
+        try:
+            r = requests.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=8)
+            if r.status_code == 200:
+                for t in r.json():
+                    cp = t.get("currency_pair", "")
+                    if cp.endswith("_USDT"):
+                        base = cp.replace("_USDT", "").upper()
+                        if base not in price_map and t.get("last"):
+                            price_map[base] = float(t["last"])
+        except Exception:
+            pass
+
+        updated_count = 0
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            rows = cur.execute("SELECT symbol, entry_price, current_price FROM assets").fetchall()
+
+            for row in rows:
+                sym = row["symbol"]
+                live_p = price_map.get(sym)
+                if not live_p:
+                    sc = ValuationEngine.ASSET_PRICE_SCENARIOS.get(sym)
+                    if sc and sc.get("current"):
+                        live_p = float(sc["current"])
+
+                if live_p:
+                    entry_p = row["entry_price"]
+                    if not entry_p:
+                        sc = ValuationEngine.ASSET_PRICE_SCENARIOS.get(sym)
+                        entry_p = float(sc["current"]) if (sc and sc.get("current")) else live_p
+
+                    pnl = round((live_p - entry_p) / entry_p * 100, 2) if entry_p else 0.0
+
+                    cur.execute("""
+                        UPDATE assets SET
+                            current_price = ?,
+                            entry_price   = COALESCE(entry_price, ?),
+                            pnl_pct       = ?,
+                            updated_at    = ?
+                        WHERE symbol = ?
+                    """, (live_p, entry_p, pnl, now_str, sym))
+                    updated_count += 1
+
+            conn.commit()
+
+        return {"updated_count": updated_count, "total_assets": len(rows)}
+
     def get_pnl_summary(self) -> List[Dict[str, Any]]:
-        """
-        Returns list of assets with PnL data for portfolio performance review.
-        Only includes assets where entry_price is set.
-        """
+        """Returns list of assets with PnL data for portfolio performance review."""
         with self._get_conn() as conn:
             cur = conn.cursor()
             rows = cur.execute("""
@@ -183,10 +253,8 @@ class CAFRegistry:
             """).fetchall()
             return [dict(r) for r in rows]
 
-
     def record_committee_decision(self, report: Any) -> None:
         """Records deliberation from Investment Committee report into database."""
-
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         s = report.signal
         actions_str = json.dumps(report.follow_up_actions, ensure_ascii=False)
@@ -200,32 +268,13 @@ class CAFRegistry:
                     cfo_reasoning, follow_up_actions
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                now_str,
-                s.symbol.upper(),
-                s.name,
-                s.category,
-                s.signal_type,
-                s.signal_strength,
-                report.verdict.value,
-                report.conviction_score,
-                report.analyst_thesis,
-                report.skeptic_critique,
-                report.cfo_reasoning,
-                actions_str,
+                now_str, s.symbol.upper(), s.name, s.category, s.signal_type,
+                s.signal_strength, report.verdict.value, report.conviction_score,
+                report.analyst_thesis, report.skeptic_critique, report.cfo_reasoning, actions_str
             ))
 
-            # If verdict is FULL_CAF or INCUBATOR, also update assets table
-            tier_map = {
-                "FULL_CAF": "Core Candidate",
-                "INCUBATOR": "High Conviction",
-                "PASS": "Watch",
-            }
-            mapped_tier = tier_map.get(report.verdict.value, "Watch")
-            status_map = {
-                "FULL_CAF": "Deep Review",
-                "INCUBATOR": "Incubator",
-                "PASS": "Archived",
-            }
+            tier_map = {"FULL_CAF": "Core Candidate", "INCUBATOR": "High Conviction", "PASS": "Watch"}
+            status_map = {"FULL_CAF": "Deep Review", "INCUBATOR": "Incubator", "PASS": "Archived"}
 
             cur.execute("""
                 INSERT INTO assets (symbol, name, sector, tier, thesis, counter_thesis, score, status, last_reviewed, updated_at)
@@ -237,41 +286,18 @@ class CAFRegistry:
                     last_reviewed = excluded.last_reviewed,
                     updated_at = excluded.updated_at
             """, (
-                s.symbol.upper(),
-                s.name,
-                s.category,
-                mapped_tier,
-                report.analyst_thesis[:300],
-                report.skeptic_critique[:300],
-                report.conviction_score,
-                status_map.get(report.verdict.value, "Active"),
-                now_str,
-                now_str,
+                s.symbol.upper(), s.name, s.category, tier_map.get(report.verdict.value, "Watch"),
+                report.analyst_thesis[:300], report.skeptic_critique[:300], report.conviction_score,
+                status_map.get(report.verdict.value, "Active"), now_str, now_str
             ))
             conn.commit()
 
-    MAX_CORE_ASSETS = 6          # Core (55% капитала, ~9.1% на актив)
-    MAX_HIGH_CONV_ASSETS = 8     # High Conviction (30% капитала, ~3.75% на актив)
-    MAX_INCUBATOR_ASSETS = 6     # Incubator (15% капитала, ~2.5% на актив)
-    MAX_ACTIVE_PORTFOLIO = 20    # СТРОГО максимум 20 активов в активном портфеле
-
     def enforce_portfolio_limit(self) -> Dict[str, Any]:
-        """
-        Enforces Darwinian selection rule:
-        - Portfolio CANNOT have more than 20 assets.
-        - Rank 1..6 by score (min 80) -> Core tier (55% capital, ~9.1% each)
-        - Rank 7..14 by score (min 70) -> High Conviction tier (30% capital, ~3.75% each)
-        - Rank 15..20 by score (min 60) -> Incubator / Invest tier (15% capital, ~2.5% each)
-        - Rank 21+ and projects below threshold -> status='Watchlist'
-        """
+        """Enforces Darwinian selection rule (strictly <= 20 assets in active portfolio)."""
         displaced = []
         with self._get_conn() as conn:
             cur = conn.cursor()
-
-            # 1. Reset all to Watchlist initially
             cur.execute("UPDATE assets SET status = 'Watchlist'")
-
-            # 2. Select candidates with valid score, excluding explicit Watch
             cur.execute("""
                 SELECT symbol, name, score, tier, target_weight FROM assets 
                 WHERE score IS NOT NULL AND tier != 'Watch'
@@ -296,18 +322,12 @@ class CAFRegistry:
                 else:
                     displaced.append({"symbol": sym, "score": sc, "displaced_to": "Watchlist"})
                     cur.execute("UPDATE assets SET status = 'Watchlist' WHERE symbol = ?", (sym,))
-
             conn.commit()
 
         return {"displaced": displaced}
 
     def get_active_portfolio(self) -> List[Dict[str, Any]]:
-        """
-        Returns ONLY the active portfolio assets (strictly maximum 20 assets):
-        - Core (max 6, target 55% allocation)
-        - High Conviction (max 8, target 30% allocation)
-        - Incubator (max 6, target 15% allocation)
-        """
+        """Returns ONLY active portfolio assets (strictly <= 20 assets)."""
         self.enforce_portfolio_limit()
         with self._get_conn() as conn:
             cur = conn.cursor()
@@ -347,89 +367,9 @@ class CAFRegistry:
             return [dict(row) for row in cur.fetchall()]
 
     def seed_from_conversation(self, clear_existing: bool = True) -> int:
-        """
-        Seeds registry with modern October 2026 CAF/CVE investment portfolio from scratch.
-        Implements dynamic risk-adjusted target weights, correlation cluster caps,
-        and eliminates all legacy zombie tokens.
-        """
-        if clear_existing:
-            with self._get_conn() as conn:
-                conn.execute("DELETE FROM assets")
-                conn.commit()
-
-        initial_projects = [
-            # 1. CORE TIER (50.0% Capital, 6 Assets, Range: 6.0% - 11.0%)
-            ("HYPE", "Hyperliquid", "Perp DEX / Sovereign L1", "Sovereign L1 / CLOB", "Core", "Крупнейший ончейн-ордербук бессрочных фьючерсов с суверенным L1, рекордный ончейн-кэшфлоу ($500M+ годовых сборов), Assistance Fund выкупает HYPE с открытого рынка, 0% венчурных анлоков", "Риск регуляторного давления на деривативы и децентрализацию валидаторов", 89.5, 11.0),
-            ("AAVE", "Aave", "DeFi Lending Monopoly", "Ethereum DeFi / Lending", "Core", "Абсолютный гегемон кредитования в Web3 (TVL > $20B), запущенный fee switch и действующая программа выкупа AAVE из протокольной выручки до $50M/год с еженедельными покупками", "Риск появления протоколов с изолированной ликвидностью нового поколения (Fluid, Morpho)", 88.5, 10.5),
-            ("RAY", "Raydium", "Solana DEX Infra", "Solana Ecosystem", "Core", "Рекордный чистый кэшфлоу ($260M годовых сборов), 12% байбэк ($31M/год) превышает эмиссию ($3.3M/год) почти в 10 раз, 0% венчурных анлоков (вестинг завершен в феврале 2024)", "Высокая цикличность и зависимость от спекулятивного объема Solana", 88.0, 8.5),
-            ("JUP", "Jupiter", "Solana Super-App / DEX", "Solana Ecosystem", "Core", "Финансовый хаб Solana ($210M годовых сборов), 50% байбэк ($105M/год) в Litterbox Trust, принята политика Net-Zero Emissions (анлоки команды заморожены)", "Риск снижения активности на Solana", 86.5, 7.5),
-            ("TAO", "Bittensor", "Decentralized AI / Subnets", "AI & Compute", "Core", "Базовый товарный слой машинного интеллекта, halving пройден в декабре 2025 (эмиссия 0.5 TAO/блок, max 21M TAO), лидер децентрализованного AI", "Сложность субсетей и отсутствие корпоративных дивидендов", 86.0, 6.5),
-            ("SOL", "Solana", "High-Throughput L1", "Solana Ecosystem", "Core", "Базовый L1 высокой пропускной способности, ядро розничной ликвидности и DePIN активности, 50% сжигание базовых транзакционных комиссий сети", "Эмиссия инфляционных наград валидаторам (~5% в год)", 85.5, 6.0),
-
-            # 2. HIGH CONVICTION TIER (30.0% Capital, 8 Assets, Range: 3.0% - 5.0%)
-            ("PENDLE", "Pendle Finance", "Yield Stripping / DeFi", "DeFi Yield Trading", "High Conviction", "Монополия на рынке ончейн-доходности, модель AIM снизила эмиссию до 0.2%/год, 80% байбэк опережает выпуск в 8-10 раз, вестинг инвесторов завершен", "Зависимость от циклов доходности на более широком рынке DeFi", 85.0, 5.0),
-            ("FLUID", "Fluid (Instadapp)", "DeFi Liquidity Layer", "Ethereum DeFi / Lending", "High Conviction", "$44M годовых сборов ($3.65M/мес), преодолен порог $10M для алгоритмического выкупа токенов, 83.7% предложения в обращении", "Конкуренция с устоявшимися пулами Aave", 84.0, 4.5),
-            ("COW", "CoW Protocol", "MEV-Protected DEX Aggregator", "Ethereum DeFi / Lending", "High Conviction", "Подтвержденный кэшфлоу ($24M годовых сборов), еженедельный TWAP-выкуп COW из сборов за MEV-защиту, 1B hard cap", "Зависимость от объемов торговли на Ethereum и Gnosis", 83.5, 4.0),
-            ("SUI", "Sui", "Layer 1 Move", "Sui Ecosystem", "High Conviction", "Самый быстрорастущий L1 нового поколения на языке Move, высокая реальная пропускная способность, институциональный приток ликвидности, блокировка в Storage Fund", "График инфляционных разблокировок токенов до 2030 года", 83.5, 4.0),
-            ("AERO", "Aerodrome", "Base DEX Infra", "Base Ecosystem", "High Conviction", "Доминирующий DEX на Base (Coinbase экосистема), 100% торговых комиссий и bribes распределяются держателям veAERO", "Инфляция эмиссии по модели ve(3,3)", 83.0, 3.5),
-            ("SKY", "Sky (MakerDAO)", "Decentralized Stablecoin & Debt", "RWA", "High Conviction", "Крупнейший эмитент децентрализованного стейблкоина ($200M+ выручки), Smart Burn Engine сжигает SKY/MKR из стабильных сборов и US Treasuries, 100% supply", "Регуляторный комплаенс и freeze-функция в USDS", 82.0, 3.0),
-            ("ENA", "Ethena", "Synthetic Dollar / Basis Trade", "DeFi Synthetic Dollar", "High Conviction", "Синтетический доллар USDe, $215M годовых сборов на базисной торговле, утвержденный фреймворк выкупа 95% выручки", "Риск отрицательных ставок фандинга и задержка активации выкупа до $7.5B supply", 81.5, 3.0),
-            ("TRAC", "OriginTrail", "Decentralized Knowledge Graph", "Knowledge / AI Data", "High Conviction", "Фиксированный supply 500M, 0% инфляции, 100% в обращении, ~20% заблокировано в DKG нодах под утилити, проверенные корпоративные партнерства", "Микроскопический объем сборов в фиатном выражении", 81.0, 3.0),
-
-            # 3. INCUBATOR TIER (5.5% Capital, 3 Assets, Range: 1.5% - 2.5%)
-            ("INJ", "Injective", "Financial L1 / CLOB", "Sovereign L1 / CLOB", "Invest", "100% токенов в обращении, 0 будущих разблокировок, еженедельный ончейн-аукцион сжигания 60% комиссий экосистемных dApps", "Конкуренция за ликвидность с Solana и L2", 79.5, 2.5),
-            ("GMX", "GMX", "Real Yield Perp DEX", "Ethereum DeFi / Lending", "Invest", "Пионер модели Real Yield ($66M годовых сборов на Arbitrum и Solana), 27% всех сборов направляются на выкуп GMX в казначейство, низкий P/Fees ~1.2x", "Конкуренция со стороны L1-ордербуков нового поколения (Hyperliquid)", 77.5, 1.5),
-            ("SYRUP", "Maple Finance", "Institutional Credit & Yield", "RWA", "Invest", "Крупнейший институциональный кредитный пул ($1.9B займов, $103M годовых сборов), 20-25% сборов займов выкупают SYRUP для stSYRUP (MIP-021)", "Кредитный хвостовой риск дефолта институциональных заемщиков", 77.0, 1.5),
-
-            # 4. WATCHLIST / RADAR (Вес 0.0%, статус Watchlist)
-            ("GEOD", "GEODNET", "DePIN / RTK Positioning", "DePIN Physical Infra", "Watch", "Заморожен по PriceTrendGate: просадка -37%, устойчивый даунтренд. Капитал переведён в USDC_RESERVE", "Низкая ликвидность на Tier-1, риск дальнейшего дрейфа цены", 72.0, 0.0),
-            ("AKT", "Akash Network", "DePIN / GPU Cloud", "AI & Compute", "Watch", "Дисквалифицирован по HardInflationGate: эмиссия ($33.5M/год) превышает реальные сборы ($2.7M/год) в 12.4x. Переведён в Short Radar", "Структурное размытие стакана инфляцией наград валидаторам", 65.0, 0.0),
-            ("RENDER", "Render Network", "DePIN / GPU Rendering & AI", "AI & Compute", "Watch", "Дисквалифицирован по HardInflationGate: эмиссия наград нодам ($20M/год) превышает сборы рендеринга ($4.5M/год) в 4.4x. Переведён в Short Radar", "Несбалансированная BME модель с постоянным давлением продаж", 66.0, 0.0),
-            ("DEEP", "DeepBook Protocol", "CLOB DEX Infra", "Sui Ecosystem", "Watch", "Центральная книга ордеров на Sui", "EVC = 0.6%: сборы $39k/мес не способны абсорбировать навес разблокировки $80M+/год", 55.0, 0.0),
-            ("ONDO", "Ondo Finance", "RWA / Tokenized Treasuries", "RWA", "Watch", "Лидер RWA, но токен чисто управленческий", "EVC = 0: выручка фонда остается в Ondo Finance Inc., отсутствует fee-switch или байбэк", 62.0, 0.0),
-            ("GRASS", "Grass", "DePIN / AI Web Scraping", "AI & Compute", "Watch", "Сеть сбора данных для AI", "EVC = 0: коммерческая выручка Grass DataCo отделена от токена, тяжелый навес разблокировок", 60.0, 0.0),
-            ("DRIFT", "Drift Protocol", "Solana Perps & Prediction", "Solana Ecosystem", "Watch", "DEX деривативов на Solana", "Байбэк не активирован в коде, утилити ограничена торговыми скидками", 64.0, 0.0),
-            ("KMNO", "Kamino Finance", "Solana DeFi Liquidity", "Solana Ecosystem", "Watch", "Кредитный хаб Solana", "EVC = 0: процентный спред оседает в казначействе DAO без прямого байбэка", 63.0, 0.0),
-            ("ATH", "Aethir", "DePIN / Enterprise Cloud", "AI & Compute", "Watch", "Корпоративная GPU сеть", "EVC = 0: выкуп нод оплачивался новыми токенами, тяжелая эмиссия наград", 58.0, 0.0),
-            ("NEAR", "NEAR Protocol", "AI & Chain Abstraction L1", "AI & Compute", "Watch", "Ведущий блокчейн в нарративе User-Owned AI и абстракции чейнов", "Сжигание газа покрывает менее 0.5% от 5% годовой инфляции", 72.0, 0.0),
-            ("PYTH", "Pyth Network", "Low-Latency Oracle Infra", "Solana Ecosystem", "Watch", "Высокочастотные ценовые оракулы первого уровня для DeFi и деривативов", "Зависимость ценности токена от модели стейкинга", 71.5, 0.0),
-            ("JTO", "Jito Network", "Solana MEV & Liquid Staking", "Solana Ecosystem", "Watch", "Монополист MEV-клиента и крупнейший LST-протокол на Solana", "Governance-heavy модель распределения наград", 71.0, 0.0),
-            ("MORPHO", "Morpho Labs", "Modular Lending Primitive", "Ethereum DeFi / Lending", "Watch", "Модульный протокол изолированных кредитных рынков нового поколения", "Fee switch не активирован на уровне протокола", 70.5, 0.0),
-            ("EIGEN", "EigenLayer", "Ethereum Restaking Infra", "Ethereum DeFi / Lending", "Watch", "Базовый протокол коллективной криптоэкономической безопасности через restaking", "Медленный запуск монетизации AVS сервисов", 70.0, 0.0),
-            ("SAFE", "Safe", "Account Abstraction Infra", "Ethereum DeFi / Lending", "Watch", "Стандарт мультисиг и смарт-аккаунтов институционального уровня", "Медленная трансляция сетевого эффекта в стоимость токена", 69.0, 0.0),
-            ("GNS", "Gains Network", "Decentralized Perps / gTrade", "Ethereum DeFi / Lending", "Watch", "Перп-DEX с устойчивым денежным потоком ($6M-$10M/год сборов) при микрокапе $10M, модель Buyback & Burn и стейкинг", "Конкуренция с Hyperliquid и L1 ордербуками нового поколения", 76.0, 0.0),
-            ("JUSD", "JUSD Finance", "Basis Trading / Private Credit", "DeFi Synthetic Dollar", "Watch", "Дельта-нейтральный базис-трейдинг и структурированная доходность в связке с Accountable", "Риск заёмщиков частных кредитных пулов и короткая история работы", 65.0, 0.0),
-            ("SEI", "Sei Network", "Parallelized EVM L1", "Other L1", "Watch", "Параллелизованный EVM первого уровня с высокой скоростью финализации", "Необходимость формирования устойчивого DeFi ландшафта", 68.5, 0.0),
-            ("TIA", "Celestia", "Modular DA Layer", "Modular Infra", "Watch", "Пионер модульной архитектуры и доступности данных (Data Availability)", "Крупные разблокировки токенов для ранних фондов", 67.0, 0.0),
-            ("W", "Wormhole", "Cross-chain Messaging Infra", "Cross-chain Infra", "Watch", "Инфраструктурный стандарт кроссчейн-коммуникации и передачи сообщений", "Низкий захват ценности токеном при высоком FDV", 65.0, 0.0),
-            ("ZK", "zkSync", "ZK-Rollup Layer 2", "Ethereum DeFi / Lending", "Watch", "Флагманский ZK-rollup от Matter Labs ($458M VC), сильная криптографическая база и ZK-Stack", "Токеномика: 40% инсайдерам, огромный FDV, токен не используется для газа (EVC = 0)", 64.0, 0.0),
-            ("ARB", "Arbitrum", "Optimistic Rollup Layer 2", "Ethereum DeFi / Lending", "Watch", "Лидер L2 по TVL ($3B+) и сборам, развитая экосистема Stylus и Orbit", "Токен чисто управленческий (газ в ETH), долгосрочный навес разблокировок DAO/инвесторов", 72.0, 0.0),
-            ("ICP", "Internet Computer", "Onchain Cloud / Sovereign L1", "Other L1", "Watch", "Амбициозное децентрализованное облако от DFINITY Foundation, прямой utility через сжигание cycles", "Умеренный розничный adoption, сильная зависимость от привлечения энтерпрайз-разработчиков", 66.0, 0.0),
-            ("XCH", "Chia Network", "Proof-of-Space-and-Time L1", "Other L1", "Watch", "Зелёный консенсус Брэма Коэна (BitTorrent), фокус на RWA и институциональные карбоновые рынки", "Корпоративный pre-farm под контролем юрлица Chia Network Inc., слабый розничный DeFi-спрос", 55.0, 0.0),
-            ("ZK", "zkSync", "ZK-Rollup Layer 2", "Ethereum DeFi / Lending", "Watch", "Флагманский ZK-rollup от Matter Labs ($458M VC), сильная криптографическая база и ZK-Stack", "Токеномика: 40% инсайдерам, огромный FDV, токен не используется для газа (EVC = 0)", 64.0, 0.0),
-            ("ARB", "Arbitrum", "Optimistic Rollup Layer 2", "Ethereum DeFi / Lending", "Watch", "Лидер L2 по TVL ($3B+) и сборам, развитая экосистема Stylus и Orbit", "Токен чисто управленческий (газ в ETH), долгосрочный навес разблокировок DAO/инвесторов", 72.0, 0.0),
-            ("ICP", "Internet Computer", "Onchain Cloud / Sovereign L1", "Other L1", "Watch", "Амбициозное децентрализованное облако от DFINITY Foundation, прямой utility через сжигание cycles", "Умеренный розничный adoption, сильная зависимость от привлечения энтерпрайз-разработчиков", 66.0, 0.0),
-            ("XCH", "Chia Network", "Proof-of-Space-and-Time L1", "Other L1", "Watch", "Зелёный консенсус Брэма Коэна (BitTorrent), фокус на RWA и институциональные карбоновые рынки", "Корпоративный pre-farm под контролем юрлица Chia Network Inc., слабый розничный DeFi-спрос", 55.0, 0.0),
-        ]
-
-        count = 0
-        for symbol, name, sector, cluster, tier, thesis, cthesis, score, weight in initial_projects:
-            self.upsert_asset(
-                symbol=symbol,
-                name=name,
-                sector=sector,
-                tier=tier,
-                thesis=thesis,
-                counter_thesis=cthesis,
-                score=score,
-                status="Active" if tier != "Watch" else "Watchlist",
-                target_weight=weight,
-                cluster=cluster,
-            )
-            count += 1
-
-        self.enforce_portfolio_limit()
-        return count
+        """Seeds registry with initial portfolio data via registry_seed module."""
+        from src.database.registry_seed import seed_initial_portfolio
+        return seed_initial_portfolio(self, clear_existing=clear_existing)
 
     def get_cluster_exposure(self) -> Dict[str, float]:
         """Calculates total allocation percentage per risk cluster."""
@@ -445,181 +385,6 @@ class CAFRegistry:
             return {row["cluster"]: round(row["total_weight"], 2) for row in cur.fetchall()}
 
     def generate_registry_markdown(self) -> Path:
-        """Exports the entire portfolio registry into clean GitHub-flavored Markdown with Valuation Layer."""
-        from src.scoring.valuation import ValuationEngine
-
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        report_path = REPORTS_DIR / "caf_portfolio_registry.md"
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-        active_portfolio = self.get_active_portfolio()
-        all_assets = self.get_all_assets()
-        watchlist = [a for a in all_assets if a["status"] != "Portfolio"]
-        decisions = self.get_decisions(limit=10)
-        clusters = self.get_cluster_exposure()
-
-        # Calculate ValuationRatings for all active assets
-        val_ratings = []
-        for a in active_portfolio:
-            vr = ValuationEngine.evaluate_entry(
-                symbol=a["symbol"],
-                name=a["name"],
-                tier=a["tier"],
-                cluster=a.get("cluster") or a.get("sector") or "",
-                fundamental_score=a["score"] or 70.0,
-                target_weight=a.get("target_weight") or 0.0,
-            )
-            val_ratings.append(vr)
-
-        total_target_weight = sum(r.target_weight for r in val_ratings)
-        total_deployed_weight = sum(r.deployed_weight for r in val_ratings)
-        total_dry_powder = sum(r.dry_powder_weight for r in val_ratings)
-        structural_cash = max(0.0, round(100.0 - total_target_weight, 1))
-        total_liquid_reserves = round(structural_cash + total_dry_powder, 1)
-
-        signal_badges = {
-            "AGGRESSIVE_BUY": "🟢 **AGGRESSIVE BUY**",
-            "BUY": "🔵 **BUY**",
-            "ACCUMULATE": "🟡 **ACCUMULATE**",
-            "WAIT_PULLBACK": "🟠 **WAIT PULLBACK**",
-            "WAIT": "⚪ **WAIT**",
-        }
-
-        tier_badges = {
-            "Core": "🟢 **CORE**",
-            "Core Candidate": "🟢 **CORE**",
-            "High Conviction": "🔵 **HIGH CONVICTION**",
-            "Invest": "🟡 **INCUBATOR**",
-            "Incubator": "🟡 **INCUBATOR**",
-            "Watch": "⚪ **WATCH**",
-        }
-
-        lines = [
-            "# CAF / CVE Portfolio & Incubator Registry (Institutional Architecture)",
-            f"**Дата актуализации:** {now_str}  ",
-            f"**Активов в активном портфеле:** {len(active_portfolio)} / {self.MAX_ACTIVE_PORTFOLIO} (Лимит: 20)  ",
-            f"**Целевой вес альтов (Target Ceiling):** {total_target_weight:.1f}% | **Фактически развёрнуто сегодня:** {total_deployed_weight:.1f}%  ",
-            f"**Тактический Dry Powder под лимитные зоны:** {total_dry_powder:.1f}% | **Структурный кэш (USDC):** {structural_cash:.1f}%  ",
-            f"**Совокупный ликвидный буфер (USDC + Dry Powder):** **{total_liquid_reserves:.1f}%**  ",
-            f"**Активов в списке наблюдения (Watchlist):** {len(watchlist)}  ",
-            "",
-            "## 💼 1. CAF Altcoin Alpha Sleeve — Тактическое распределение капитала",
-            "Архитектура разделения: **Качество проекта (CVE Score)** задаёт целевой потолок доли (Target Weight), а **Оценка точки входа (Entry Score)** определяет объём фактического развёртывания капитала сегодня (Deployed Weight) и размер отложенного лимитного ордера (Dry Powder).",
-            "",
-            "| Тикер | Проект | Кластер риска | Уровень | Цель % | Развёрнуто % | Резерв % | CVE | Entry | Сигнал | Зона добора (Buy Limit Zone) |",
-            "|---|---|---|---|---|---|---|---|---|---|---|",
-        ]
-
-        for vr in val_ratings:
-            t_badge = tier_badges.get(vr.tier, vr.tier)
-            s_badge = signal_badges.get(vr.entry_signal, vr.entry_signal)
-            primary_zone = vr.buy_zones[0] if vr.buy_zones else "—"
-            lines.append(
-                f"| `{vr.symbol}` | **{vr.name}** | {vr.cluster} | {t_badge} | **{vr.target_weight:.1f}%** | {vr.deployed_weight:.1f}% | {vr.dry_powder_weight:.1f}% | {vr.fundamental_score:.1f} | **{vr.entry_score:.1f}** | {s_badge} | `{primary_zone}` |"
-            )
-
-        lines += [
-            "",
-            f"| `USDC` | **Cash Reserve** | Liquidity Buffer | 🛡️ **RESERVE** | **{structural_cash:.1f}%** | {structural_cash:.1f}% | 0.0% | 100.0 | 100.0 | 🛡️ **STABLE** | Базовый структурный буфер ликвидности |",
-            f"| `USDC_DCA`| **Tactical Dry Powder** | Tactical Buffer | ⏳ **DRY POWDER** | **{total_dry_powder:.1f}%** | 0.0% | {total_dry_powder:.1f}% | 100.0 | — | ⏳ **PENDING** | Отложенные лимитные сетки на откатах (HYPE, TAO и др.) |",
-            "",
-            "---",
-            "## 📐 2. Матрица Оценки и Сценарного Анализа (5-Layer Valuation Engine)",
-            "Сценарный анализ асимметрии доходности: вероятностно-взвешенные сценарии (Bear 35% / Base 45% / Bull 20%) и соотношение потенциала роста к риску просадки (Asymmetry Ratio = Base Upside / Downside Risk).",
-            "",
-            "| Тикер | Текущая ($) | ATH ($) | От ATH % | Bear ($) | Base ($) | Bull ($) | EV Доход % | Downside % | Асимметрия R/R | Тактический Сигнал |",
-            "|---|---|---|---|---|---|---|---|---|---|---|",
-        ]
-
-        for vr in val_ratings:
-            s_badge = signal_badges.get(vr.entry_signal, vr.entry_signal)
-            cur_fmt = f"${vr.current_price:,.2f}" if vr.current_price >= 1.0 else f"${vr.current_price:.3f}"
-            ath_fmt = f"${vr.ath_price:,.2f}" if vr.ath_price >= 1.0 else f"${vr.ath_price:.3f}"
-            bear_fmt = f"${vr.expected_value:,.2f}"  # helper
-            # Get raw scenario values from ASSET_PRICE_SCENARIOS
-            sc_data = ValuationEngine.ASSET_PRICE_SCENARIOS.get(vr.symbol, {})
-            b_bear = f"${sc_data.get('bear', 0):,.2f}" if sc_data.get('bear', 0) >= 1.0 else f"${sc_data.get('bear', 0):.3f}"
-            b_base = f"${sc_data.get('base', 0):,.2f}" if sc_data.get('base', 0) >= 1.0 else f"${sc_data.get('base', 0):.3f}"
-            b_bull = f"${sc_data.get('bull', 0):,.2f}" if sc_data.get('bull', 0) >= 1.0 else f"${sc_data.get('bull', 0):.3f}"
-
-            lines.append(
-                f"| `{vr.symbol}` | {cur_fmt} | {ath_fmt} | {vr.ath_drawdown_pct:+.1f}% | {b_bear} | {b_base} | {b_bull} | {vr.ev_return_pct:+.1f}% | {vr.downside_pct:+.1f}% | **{vr.asymmetry_ratio:.2f}x** | {s_badge} |"
-            )
-
-        lines += [
-            "",
-            "---",
-            "## 🛡️ 3. Контроль Концентрации и Кластерных Лимитов (Cluster Risk Caps)",
-            "| Кластер риска | Текущий вес (Целевой) | Лимит риска | Статус контроля | Активы кластера |",
-            "|---|---|---|---|---|",
-        ]
-
-        cluster_limits = {
-            "AI & Compute": (24.0, "TAO, AKT, RENDER, GRASS, ATH"),
-            "Solana Ecosystem": (20.0, "RAY, JUP, DRIFT, KMNO"),
-            "Ethereum DeFi / Lending": (25.0, "AAVE, FLUID"),
-            "Sovereign L1 / CLOB": (15.0, "HYPE, INJ"),
-            "RWA": (10.0, "ONDO"),
-            "DePIN Physical Infra": (10.0, "GEOD"),
-            "DeFi Yield Trading": (10.0, "PENDLE"),
-            "Sui Ecosystem": (8.0, "SUI, DEEP"),
-            "Knowledge / AI Data": (10.0, "TRAC"),
-            "DeFi Synthetic Dollar": (8.0, "ENA"),
-        }
-
-        for c_name, c_weight in clusters.items():
-            cap, assets_str = cluster_limits.get(c_name, (20.0, "—"))
-            status = "✅ В пределах лимита" if c_weight <= cap else "⚠️ ПРЕВЫШЕНИЕ"
-            lines.append(f"| **{c_name}** | **{c_weight:.1f}%** | $\\le {cap:.1f}\\%$ | {status} | {assets_str} |")
-
-        lines += [
-            "",
-            "---",
-            "## 🌐 4. Институциональный Macro-Портфель (Total Crypto Portfolio)",
-            "Если CAF управляет **всем совокупным криптокапиталом**, базовый слой формируют монетарный якорь BTC и расчетная инфраструктура ETH:",
-            "",
-            "| Компонент | Роль в балансе | Доля от капитала | Активы и стратегия |",
-            "|---|---|---|---|",
-            "| 🥇 **Macro Core Anchor** | Монетарный резерв и базовый L1 | **45.0%** | **BTC (35.0%)** + **ETH (10.0%)** — минимальный бета-риск, защита капитала |",
-            "| 🚀 **CAF Alpha Sleeve** | Генерация избыточной доходности | **50.0%** | 20 активов CAF (вес каждого актива = 50% от целевого веса в Altcoin Sleeve) |",
-            "| 💵 **Tactical Cash** | Буфер ликвидности | **5.0%** | **USDC / USDT** — тактический резерв под ребалансировку и волатильность |",
-            "",
-            "---",
-            f"## 📋 5. Резервная скамья и наблюдение (Watchlist — {len(watchlist)} активов)",
-            "",
-            "| Тикер | Проект | Сектор | Уровень CVE | Score | Причина нахождения в резерве |",
-            "|---|---|---|---|---|---|",
-        ]
-
-        for a in watchlist:
-            badge = tier_badges.get(a["tier"], a["tier"])
-            score_str = f"{a['score']:.1f}" if a["score"] else "—"
-            reason = (a["counter_thesis"][:80] + "...") if a.get("counter_thesis") else (a["thesis"][:80] if a.get("thesis") else "Наблюдение")
-            lines.append(
-                f"| `{a['symbol']}` | {a['name']} | {a['sector']} | {badge} | {score_str} | {reason} |"
-            )
-
-        if decisions:
-            lines += [
-                "",
-                "---",
-                "## 🏛️ 6. Последние решения Инвестиционного Комитета",
-                "",
-                "| Дата | Проект | Сигнал | Вердикт | Уверенность | Резюме CFO |",
-                "|---|---|---|---|---|---|",
-            ]
-            verdict_badges = {
-                "FULL_CAF": "🔴 **FULL CAF**",
-                "INCUBATOR": "🟡 **INCUBATOR**",
-                "PASS": "⚪ **PASS**",
-            }
-            for d in decisions:
-                v_badge = verdict_badges.get(d["verdict"], d["verdict"])
-                cfo_short = (d["cfo_reasoning"][:100] + "...") if d["cfo_reasoning"] and len(d["cfo_reasoning"]) > 100 else (d["cfo_reasoning"] or "—")
-                cfo_clean = cfo_short.replace("\n", " ")
-                lines.append(
-                    f"| {d['created_at'][:16]} | **{d['name']}** (`{d['symbol']}`) | {d['signal_type']} | {v_badge} | {d['conviction_score']:.0f}% | {cfo_clean} |"
-                )
-
-        report_path.write_text("\n".join(lines), encoding="utf-8")
-        return report_path
+        """Exports the entire portfolio registry into clean GitHub-flavored Markdown."""
+        from src.database.registry_exporter import export_registry_markdown
+        return export_registry_markdown(self)
