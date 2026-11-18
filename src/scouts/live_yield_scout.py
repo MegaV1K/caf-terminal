@@ -25,9 +25,9 @@ PENDLE_MARKETS_URL = "https://api-v2.pendle.finance/core/v1/1/markets"
 class LiveYieldScout:
     """Fetches and verifies real-time funding arbitrage and Pendle PT yields."""
 
-    def __init__(self, cache_ttl: int = 900):  # 15 minutes cache
+    def __init__(self, cache_ttl: int = 900, cache_dir: Optional[Path] = None):  # 15 minutes cache
         self.cache_ttl = cache_ttl
-        self.cache_dir = CACHE_DIR
+        self.cache_dir = cache_dir or CACHE_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.headers = {"User-Agent": "CAF-Terminal/2.4.0 (Windows NT 10.0)"}
 

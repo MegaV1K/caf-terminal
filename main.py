@@ -332,6 +332,7 @@ def run_registry_view():
     from src.scoring.valuation import ValuationEngine
 
     reg = CAFRegistry()
+    reg.update_live_prices()
     active_portfolio = reg.get_active_portfolio()
     if not active_portfolio:
         print("[Info] База данных пуста. Запуск наполнения из базового анализа...")
@@ -406,6 +407,7 @@ def run_pnl_view():
     """Displays portfolio PnL performance table."""
     from src.database.registry import CAFRegistry
     reg = CAFRegistry()
+    reg.update_live_prices()
     summary = reg.get_pnl_summary()
     if not summary:
         print("\n" + "=" * 80)

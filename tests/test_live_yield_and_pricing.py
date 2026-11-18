@@ -10,8 +10,8 @@ from src.scouts.live_yield_scout import LiveYieldScout
 from src.database.registry import CAFRegistry
 
 
-def test_live_yield_scout_hyperliquid_filtering():
-    scout = LiveYieldScout()
+def test_live_yield_scout_hyperliquid_filtering(tmp_path):
+    scout = LiveYieldScout(cache_dir=tmp_path)
     mock_meta = {
         "universe": [{"name": "TESTCOIN"}],
     }
@@ -31,8 +31,8 @@ def test_live_yield_scout_hyperliquid_filtering():
         assert opps[0]["venue"] == "Hyperliquid"
 
 
-def test_live_yield_scout_pendle_pt():
-    scout = LiveYieldScout()
+def test_live_yield_scout_pendle_pt(tmp_path):
+    scout = LiveYieldScout(cache_dir=tmp_path)
     mock_pendle_res = {
         "results": [
             {
