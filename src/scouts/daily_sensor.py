@@ -271,6 +271,29 @@ def run_daily_sensor(force_refresh: bool = False) -> List[Dict[str, Any]]:
     buy_triggers = sensor.check_buy_zones(force_refresh=force_refresh)
     pinning_alerts = sensor.check_options_pinning(force_refresh=force_refresh)
 
+    # 4. News & Market Sentiment Audit (CryptoPanic + Alternative.me Fear & Greed)
+    sentiment_data = None
+    try:
+        from src.scouts.news_sentiment import NewsSentimentScout
+        ns = NewsSentimentScout()
+        portfolio_symbols = [b["symbol"] for b in buy_triggers] if buy_triggers else ["BTC", "ETH", "SOL", "HYPE"]
+        sentiment_data = ns.audit_portfolio_sentiment(portfolio_symbols=portfolio_symbols, force_refresh=force_refresh)
+    except Exception as e:
+        print(f"[Warning] Sentiment check notice: {e}")
+
+    if sentiment_data:
+        fng = sentiment_data.get("fear_and_greed", {})
+        print("\n" + "-" * 70)
+        print(f"🌡️ РЫНОЧНЫЙ СЕНТИМЕНТ & ПАНИК-ФОН:")
+        print(f"  • Индекс страха и жадности: {fng.get('value', 50)}/100 ({fng.get('classification', 'Neutral')}) | Среднее 7д: {fng.get('historical_7d_avg', 50.0)}")
+        if sentiment_data.get("alerts"):
+            print("  • Срочные новости / паник-сигналы портфеля:")
+            for al in sentiment_data["alerts"][:3]:
+                toks = ", ".join(al.get("currencies", []))
+                print(f"    - [{al['type']}] ({toks}): {al['title']}")
+        else:
+            print("  • Критических паник-сигналов по активам портфеля не зафиксировано.")
+
     if pinning_alerts:
         print("\n" + "-" * 70)
         print("🎯 СИГНАЛЫ ДЕРИВАТИВОВ: ПРИБЛИЖЕНИЕ К УРОВНЯМ PINNING (DERIBIT):")
@@ -283,7 +306,7 @@ def run_daily_sensor(force_refresh: bool = False) -> List[Dict[str, Any]]:
     print("[Telegram] Отправка ежедневного отчёта...")
     try:
         from src.notifications.telegram import notify_daily_heartbeat
-        notify_daily_heartbeat(anomalies, buy_triggers, options_alerts=pinning_alerts)
+        notify_daily_heartbeat(anomalies, buy_triggers, options_alerts=pinning_alerts, sentiment=sentiment_data)
         print("[OK] Ежедневный отчёт успешно доставлен в Telegram.")
     except Exception as e:
         print(f"[!] Ошибка отправки: {e}")

@@ -136,14 +136,27 @@ def notify_daily_heartbeat(
     anomalies: List[Dict[str, Any]],
     buy_triggers: List[Dict[str, Any]],
     options_alerts: Optional[List[Dict[str, Any]]] = None,
+    sentiment: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Sends daily status report to Telegram.
-    If anomalies, buy_triggers, or options_alerts exist -> highlights them.
+    If anomalies, buy_triggers, options_alerts, or sentiment alerts exist -> highlights them.
     If calm -> confirms portfolio health and status.
     """
     from datetime import datetime
     lines = ["<b>⚡ CAF-Terminal | Ежедневный Утренний Отчёт</b>\n"]
+
+    if sentiment:
+        fng = sentiment.get("fear_and_greed", {})
+        val = fng.get("value", 50)
+        cls_name = fng.get("classification", "Neutral")
+        avg7d = fng.get("historical_7d_avg", 50.0)
+        lines.append(f"🌡️ <b>Сентимент (Fear & Greed):</b> <b>{val}/100</b> ({cls_name}, 7d ср: {avg7d})")
+        if sentiment.get("alerts"):
+            for al in sentiment["alerts"][:2]:
+                curr_str = ", ".join(al.get("currencies", []))
+                lines.append(f"  • ⚠️ <b>{al['type']}</b> ({curr_str}): {al['title']}")
+        lines.append("")
 
     if options_alerts:
         lines.append("📈 <b>Опционные уровни Pinning (Deribit):</b>")

@@ -40,5 +40,10 @@ COINGECKO_TRENDING_URL = "https://api.coingecko.com/api/v3/search/trending"
 DERIBIT_BASE_URL = "https://www.deribit.com/api/v2"
 DERIBIT_CACHE_TTL = int(os.getenv("DERIBIT_CACHE_TTL_MINUTES", "15")) * 60
 
+# CryptoPanic & Market Sentiment Settings
+CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
+CRYPTOPANIC_ENABLED = os.getenv("CRYPTOPANIC_ENABLED", "true").lower() == "true"
+CRYPTOPANIC_BASE_URL = "https://cryptopanic.com/api/v1/posts/"
+
 # Cache TTL in seconds (default: 4 hours)
 CACHE_TTL = int(os.getenv("CACHE_TTL_HOURS", "4")) * 3600

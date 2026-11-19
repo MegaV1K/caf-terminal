@@ -635,6 +635,53 @@ def run_weekly_cycle(top_n: int = 20, candidates: int = 5, force_refresh: bool =
     run_committee(max_candidates=candidates, force_refresh=force_refresh)
 
 
+def run_sentiment_analysis(force_refresh: bool = False):
+    """Executes news sentiment, Fear & Greed index, and CryptoPanic scan."""
+    print("\n" + "=" * 70)
+    print("📰 [NEWS & SENTIMENT] СКАНЕР РЫНОЧНОГО НАСТРОЕНИЯ И ПАНИК-ФОНА")
+    print("=" * 70)
+    from src.scouts.news_sentiment import NewsSentimentScout
+    from src.database.registry import CAFRegistry
+
+    reg = CAFRegistry()
+    active_assets = [a["symbol"] for a in reg.get_active_portfolio()[:10]]
+    if not active_assets:
+        active_assets = ["BTC", "ETH", "SOL", "HYPE", "AAVE", "RAY", "JUP"]
+
+    scout = NewsSentimentScout()
+    res = scout.audit_portfolio_sentiment(portfolio_symbols=active_assets, force_refresh=force_refresh)
+
+    fng = res.get("fear_and_greed", {})
+    print(f"\n1. 🌡️ ИНДЕКС СТРАХА И ЖАДНОСТИ (ALTERNATIVE.ME):")
+    print(f"   • Текущее значение: {fng.get('value', 50)}/100 ({fng.get('classification', 'Neutral')})")
+    print(f"   • Среднее за 7 дней: {fng.get('historical_7d_avg', 50.0)}")
+
+    print(f"\n2. 📡 СТАТУС ИСТОЧНИКА CRYPTOPANIC:")
+    cp_st = res.get("cryptopanic_status", "unknown")
+    print(f"   • Статус API: {cp_st.upper()} ({res.get('cryptopanic_reason', 'OK')})")
+    if cp_st == "unauthenticated":
+        print("   • Инфо: Задайте CRYPTOPANIC_API_KEY в .env для получения персонального потока CryptoPanic.")
+        print("   • Для отключения модуля: установите CRYPTOPANIC_ENABLED=false в .env.")
+
+    alerts = res.get("alerts", [])
+    if alerts:
+        print(f"\n3. 🚨 ВАЖНЫЕ СИГНАЛЫ И АЛЕРТЫ ПО ПОРТФЕЛЮ ({len(alerts)}):")
+        for a in alerts:
+            toks = ", ".join(a.get("currencies", []))
+            print(f"   • [{a['type']}] ({toks}): {a['title']}")
+            if a.get("url"):
+                print(f"     URL: {a['url']}")
+    else:
+        print("\n3. 🚨 ВАЖНЫЕ СИГНАЛЫ И АЛЕРТЫ ПО ПОРТФЕЛЮ: критических аномалий не обнаружено.")
+
+    headlines = res.get("recent_headlines", [])
+    if headlines:
+        print(f"\n4. 🗞️ СВЕЖИЕ ЗАГОЛОВКИ ИНДУСТРИИ (OPEN RSS):")
+        for h in headlines[:5]:
+            print(f"   • [{h.get('published_at', '')}] {h['title']}")
+    print("=" * 70)
+
+
 def main():
     parser = argparse.ArgumentParser(description="CAF-Terminal: Automated Radar & CVE Scoring")
     # Cadence framework
@@ -660,6 +707,8 @@ def main():
     parser.add_argument("--asymmetric", action="store_true", help="[Alpha] Поиск и скоринг 50x–100x асимметричных активов")
     parser.add_argument("--alpha",      action="store_true", help="Алиас для --asymmetric")
     parser.add_argument("--radar",      action="store_true", help="Запустить поиск Emerging/Incubator проектов")
+    parser.add_argument("--sentiment",  action="store_true", help="[Sentiment] Скан рыночного сентимента (Fear & Greed, CryptoPanic, RSS)")
+    parser.add_argument("--news",       action="store_true", help="Алиас для --sentiment")
     parser.add_argument("--cve",        action="store_true", help="Запустить CVE скоринг ключевых активов")
     parser.add_argument("--committee",  action="store_true", help="Запустить 3-агентный инвестиционный комитет")
     parser.add_argument("--registry",   action="store_true", help="Показать реестр портфеля и базы проектов")
@@ -743,6 +792,8 @@ def main():
         run_committee(max_candidates=args.candidates, force_refresh=args.refresh)
     elif args.radar:
         run_emerging_radar(top_n=args.top, force_refresh=args.refresh)
+    elif args.sentiment or args.news:
+        run_sentiment_analysis(force_refresh=args.refresh)
     elif args.cve:
         run_cve_scoring(force_refresh=args.refresh)
     else:
